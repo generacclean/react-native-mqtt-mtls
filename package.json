@@ -1,0 +1,54 @@
+{
+  "name": "@generacclean/react-native-mqtt-mtls",
+  "version": "1.0.0",
+  "description": "A React Native MQTT client with mTLS (mutual TLS) support",
+  "main": "index.ts",
+  "types": "index.d.ts",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "react-native",
+    "mqtt",
+    "mtls",
+    "tls",
+    "ssl",
+    "android",
+    "ios",
+    "iot",
+    "messaging"
+  ],
+  "author": "Ved Yedla",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/generacclean/react-native-mqtt-mtls.git"
+  },
+  "bugs": {
+    "url": "https://github.com/generacclean/react-native-mqtt-mtls/issues"
+  },
+  "homepage": "https://github.com/generacclean/react-native-mqtt-mtls#readme",
+  "peerDependencies": {
+    "react": ">=16.8.0",
+    "react-native": ">=0.60.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-native": "^0.70.0",
+    "typescript": "^4.9.0"
+  },
+  "files": [
+    "android/",
+    "ios/",
+    "src/",
+    "index.ts",
+    "index.d.ts",
+    "react-native.config.js",
+    "react-native-mqtt-mtls.podspec",
+    "README.md",
+    "LICENSE"
+  ]
+}
