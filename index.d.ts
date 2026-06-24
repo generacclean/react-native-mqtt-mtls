@@ -1,4 +1,4 @@
-declare module "react-native-mqtt-mtls" {
+declare module "@generacclean/react-native-mqtt-mtls" {
   import { ReactNode } from "react";
 
   export interface MqttMessage {
@@ -18,6 +18,10 @@ declare module "react-native-mqtt-mtls" {
   export interface MqttConfig {
     broker: string;
     clientId: string;
+    /**
+     * Whether to connect as an admin user with full permissions.
+     * Defaults to true. Set to false only if SNI hostname verification is required.
+     */
     isAdminUser?: boolean;
     sniHostname?: string;
     brokerIp?: string;
