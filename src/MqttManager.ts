@@ -147,10 +147,10 @@ export class MqttManager {
         config.broker,
         config.clientId,
         config.certificates,
-        config.isAdminUser ? null : config.sniHostname ?? null,
+        config.isAdminUser ?? true ? null : config.sniHostname ?? null,
         config.brokerIp ?? null,
-        config.isAdminUser ? null : config.brokerCommonName ?? null,
-        config.isAdminUser ?? false,
+        config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
+        config.isAdminUser ?? true,
         (success) => {
           console.log("[MqttManager] Connect success:", success);
           resolve();
@@ -308,13 +308,13 @@ export class MqttManager {
 
     if (typeof MqttModule.cleanup === "function") {
       MqttModule.cleanup(
-        () => { },
-        () => { },
+        () => {},
+        () => {},
       );
     } else {
       MqttModule.disconnect(
-        () => { },
-        () => { },
+        () => {},
+        () => {},
       );
     }
 

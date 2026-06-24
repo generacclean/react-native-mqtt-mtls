@@ -146,10 +146,10 @@ export const MqttProvider = ({ children }) => {
           config.broker,
           config.clientId,
           config.certificates,
-          config.isAdminUser ? null : config.sniHostname ?? null,
+          config.isAdminUser ?? true ? null : config.sniHostname ?? null,
           config.brokerIp ?? null,
-          config.isAdminUser ? null : config.brokerCommonName ?? null,
-          config.isAdminUser ?? false,
+          config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
+          config.isAdminUser ?? true,
           (success) => {
             console.log("Connect success:", success);
             resolve(success);
