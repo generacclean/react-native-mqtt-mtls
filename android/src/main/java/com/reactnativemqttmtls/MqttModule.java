@@ -658,10 +658,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
             }
 
             byte[] payload;
-            try {
-                payload = android.util.Base64.decode(message, android.util.Base64.NO_WRAP);
-            } catch (IllegalArgumentException e) {
+            // Check if message is marked as Base64-encoded binary (prefixed with "B64:")
+            // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
+            if (message.startsWith("B64:")) {
+                // Remove marker and decode Base64
+                String base64Data = message.substring(4);
+                payload = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP);
+                Log.d(TAG, "Publish: decoded marked Base64 message (" + payload.length + " bytes) for topic: " + topic);
+            } else {
+                // Plain text (UTF-8) - common case for JSON strings
                 payload = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                Log.d(TAG, "Publish: using UTF-8 text (" + payload.length + " bytes) for topic: " + topic);
             }
 
             MqttMessage mqttMessage = new MqttMessage(payload);

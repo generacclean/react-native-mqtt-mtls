@@ -257,15 +257,17 @@ export class MqttManager {
           bytes = message;
         }
 
-        // Convert to Base64
+        // Convert to Base64 and prefix with marker to distinguish from plain text
+        // that happens to be valid Base64 (e.g., JSON strings)
         let binary = "";
         const len = bytes.byteLength;
         for (let i = 0; i < len; i++) {
           binary += String.fromCharCode(bytes[i]);
         }
-        publishMessage = btoa(binary);
+        // Prefix with "B64:" to mark this as intentional Base64-encoded binary
+        publishMessage = "B64:" + btoa(binary);
 
-        console.log("[MqttManager] Converted binary to Base64:", {
+        console.log("[MqttManager] Converted binary to Base64 with marker:", {
           topic,
           originalByteLength: len,
           base64Length: publishMessage.length,

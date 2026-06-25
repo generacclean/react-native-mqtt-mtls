@@ -350,20 +350,31 @@ class MqttModule: RCTEventEmitter {
         }
         
         let mqttQos = CocoaMQTTQoS(rawValue: UInt8(qos)) ?? .qos1
-        
-        if let binaryData = Data(base64Encoded: message) {
-            let payload = [UInt8](binaryData)
-            let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
-            client.publish(mqttMessage)
-            os_log("✓ Published binary data (%d bytes)", log: logger, type: .info, payload.count)
+
+        // Check if message is marked as Base64-encoded binary (prefixed with "B64:")
+        // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
+        if message.hasPrefix("B64:") {
+            // Remove marker and decode Base64
+            let base64String = String(message.dropFirst(4))
+            if let binaryData = Data(base64Encoded: base64String) {
+                let payload = [UInt8](binaryData)
+                let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
+                client.publish(mqttMessage)
+                os_log("✓ Published marked Base64 binary data (%d bytes)", log: logger, type: .info, payload.count)
+            } else {
+                os_log("✗ Failed to decode Base64 message", log: logger, type: .error)
+                errorCallback(["Failed to decode Base64 message"])
+                return
+            }
         } else {
+            // Plain text (UTF-8) - common case for JSON strings
             if let stringData = message.data(using: .utf8) {
                 let payload = [UInt8](stringData)
                 let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
                 client.publish(mqttMessage)
-                os_log("✓ Published string data (%d bytes)", log: logger, type: .info, payload.count)
+                os_log("✓ Published UTF-8 text data (%d bytes)", log: logger, type: .info, payload.count)
             } else {
-                os_log("✗ Failed to encode message", log: logger, type: .error)
+                os_log("✗ Failed to encode message as UTF-8", log: logger, type: .error)
                 errorCallback(["Failed to encode message as UTF-8"])
                 return
             }
