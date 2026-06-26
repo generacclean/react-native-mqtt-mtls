@@ -82,7 +82,8 @@ export class MqttManager {
         try {
           const parsedData = typeof data === "string" ? JSON.parse(data) : data;
 
-          // Decode Base64 binary messages and convert to hex string for Field Pro compatibility
+          // Decode Base64 binary messages and return as ArrayBuffer directly
+          // This matches the behavior of other MQTT clients (Paho) which deliver binary as ArrayBuffer
           if (parsedData.isBinary && parsedData.message) {
             try {
               const binaryString = atob(parsedData.message);
@@ -91,19 +92,15 @@ export class MqttManager {
                 bytes[i] = binaryString.charCodeAt(i);
               }
 
-              // Convert bytes to hex string for Field Pro handlers (Buffer.from(message, 'hex'))
-              const hexString = Array.from(bytes)
-                .map((byte) => byte.toString(16).padStart(2, "0"))
-                .join("");
-
-              // Replace message content with hex string so handlers receive it directly
-              parsedData.message = hexString;
+              // Return ArrayBuffer directly - this is what MQTT handlers expect
+              // Use slice() to create a proper ArrayBuffer (not ArrayBufferLike)
+              parsedData.message = bytes.buffer.slice(0) as ArrayBuffer;
               console.log(
                 "[MqttManager] Message received:",
                 parsedData.topic,
                 "(",
                 bytes.length,
-                "bytes, hex encoded)",
+                "bytes, binary ArrayBuffer)",
               );
             } catch (decodeErr) {
               console.error(

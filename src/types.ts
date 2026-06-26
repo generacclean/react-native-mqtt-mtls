@@ -1,6 +1,6 @@
 export interface MqttMessage {
   topic: string;
-  message: string;
+  message: string | ArrayBuffer;
   qos: number;
   isBinary?: boolean;
 }

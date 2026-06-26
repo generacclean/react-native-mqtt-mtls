@@ -3,7 +3,7 @@ declare module "@generacclean/react-native-mqtt-mtls" {
 
   export interface MqttMessage {
     topic: string;
-    message: string;
+    message: string | ArrayBuffer;
     qos: number;
     isBinary?: boolean;
   }
