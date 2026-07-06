@@ -15,6 +15,12 @@ import org.eclipse.paho.client.mqttv3.*;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import java.io.*;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.*;
 import java.util.*;
@@ -32,6 +38,23 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private final ReactApplicationContext reactContext;
     private MqttAndroidClient client;
     private volatile boolean isAutoReconnectEnabled = false;
+
+    /**
+     * Detects whether payload is binary data or UTF-8 text.
+     * Returns true if the data cannot be decoded as UTF-8 or contains control characters
+     * (excluding whitespace).
+     */
+    private boolean isBinaryData(byte[] payload) {
+        try {
+            CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
+            decoder.onMalformedInput(CodingErrorAction.REPORT);
+            decoder.onUnmappableCharacter(CodingErrorAction.REPORT);
+            decoder.decode(ByteBuffer.wrap(payload));
+            return false;  // Successfully decoded as UTF-8 → text
+        } catch (CharacterCodingException e) {
+            return true;  // Not valid UTF-8 → binary
+        }
+    }
 
     public MqttModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -388,14 +411,27 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
                     try {
-                        String payloadBase64 = android.util.Base64.encodeToString(
-                                message.getPayload(),
-                                android.util.Base64.NO_WRAP);
+                        byte[] payload = message.getPayload();
+                        boolean isBinary = isBinaryData(payload);
 
                         WritableMap eventData = Arguments.createMap();
                         eventData.putString("topic", topic);
-                        eventData.putString("message", payloadBase64);
-                        eventData.putBoolean("isBinary", true);
+
+                        if (isBinary) {
+                            // Binary data: Base64 encode for transport over bridge
+                            String payloadBase64 = android.util.Base64.encodeToString(
+                                    payload,
+                                    android.util.Base64.NO_WRAP);
+                            eventData.putString("message", payloadBase64);
+                            eventData.putBoolean("isBinary", true);
+                            Log.d(TAG, "Received binary message on topic " + topic + " (" + payload.length + " bytes)");
+                        } else {
+                            // Text data: Send as UTF-8 string
+                            String messageStr = new String(payload, StandardCharsets.UTF_8);
+                            eventData.putString("message", messageStr);
+                            eventData.putBoolean("isBinary", false);
+                            Log.d(TAG, "Received text message on topic " + topic + " (" + payload.length + " bytes)");
+                        }
 
                         reactContext
                                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
