@@ -11,6 +11,12 @@ class MqttModule: RCTEventEmitter {
     /// Must match the prefix in JavaScript layer (MqttManager.ts).
     private static let BINARY_MARKER = "B64:"
 
+    /// Detects whether payload is binary data or UTF-8 text.
+    /// Returns true if the data cannot be decoded as UTF-8.
+    private func isBinaryData(_ data: Data) -> Bool {
+        return String(data: data, encoding: .utf8) == nil
+    }
+
     private var mqttClient: CocoaMQTT?
     private var expectedBrokerCN: String?
     private var connectSuccessCallback: RCTResponseSenderBlock?
@@ -826,16 +832,37 @@ extension MqttModule: CocoaMQTTDelegate {
     
     func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
         os_log("DELEGATE: didReceiveMessage (id=%d, topic=%{public}@, size=%d bytes)", log: logger, type: .info, id, message.topic, message.payload.count)
-        
+
         let payloadData = Data(message.payload)
-        let payloadBase64 = payloadData.base64EncodedString()
-        
-        self.sendEvent(withName: "MqttMessage", body: [
+        let isBinary = self.isBinaryData(payloadData)
+
+        var eventBody: [String: Any] = [
             "topic": message.topic,
-            "message": payloadBase64,
-            "isBinary": true,
             "qos": message.qos.rawValue
-        ])
+        ]
+
+        if isBinary {
+            // Binary data: Base64 encode for transport over bridge
+            let payloadBase64 = payloadData.base64EncodedString()
+            eventBody["message"] = payloadBase64
+            eventBody["isBinary"] = true
+            os_log("Received binary message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
+        } else {
+            // Text data: Send as UTF-8 string
+            if let messageStr = String(data: payloadData, encoding: .utf8) {
+                eventBody["message"] = messageStr
+                eventBody["isBinary"] = false
+                os_log("Received text message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
+            } else {
+                // Fallback if UTF-8 decoding fails (shouldn't happen if isBinaryData works correctly)
+                let payloadBase64 = payloadData.base64EncodedString()
+                eventBody["message"] = payloadBase64
+                eventBody["isBinary"] = true
+                os_log("UTF-8 decode failed, treating as binary: %{public}@", log: logger, type: .error, message.topic)
+            }
+        }
+
+        self.sendEvent(withName: "MqttMessage", body: eventBody)
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didSubscribeTopics success: NSDictionary, failed: [String]) {
