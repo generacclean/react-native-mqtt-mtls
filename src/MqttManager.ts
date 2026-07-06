@@ -3,6 +3,13 @@ import MqttModule from "./MqttModule";
 import type { MqttConfig, MqttMessage } from "./types";
 
 /**
+ * Prefix marker to distinguish intentional Base64-encoded binary messages
+ * from plain text that happens to be valid Base64 (e.g., JSON strings).
+ * Must match the prefix checked in native Android and iOS modules.
+ */
+const BINARY_MARKER = "B64:";
+
+/**
  * Singleton MQTT Manager for imperative API usage.
  * Wraps the native MqttModule and provides a simple connect/disconnect/pub/sub interface.
  *
@@ -82,8 +89,9 @@ export class MqttManager {
         try {
           const parsedData = typeof data === "string" ? JSON.parse(data) : data;
 
-          // Decode Base64 binary messages and return as ArrayBuffer directly
-          // This matches the behavior of other MQTT clients (Paho) which deliver binary as ArrayBuffer
+          // Decode Base64 binary messages and return as Uint8Array
+          // Uint8Array is the correct type for binary data and works directly with
+          // TextDecoder, Buffer.from(), and protobuf parsers without conversion
           if (parsedData.isBinary && parsedData.message) {
             try {
               const binaryString = atob(parsedData.message);
@@ -92,15 +100,15 @@ export class MqttManager {
                 bytes[i] = binaryString.charCodeAt(i);
               }
 
-              // Return ArrayBuffer directly - this is what MQTT handlers expect
-              // Use slice() to create a proper ArrayBuffer (not ArrayBufferLike)
-              parsedData.message = bytes.buffer.slice(0) as ArrayBuffer;
+              // Return Uint8Array directly - no .slice() copy needed since bytes.buffer
+              // is already a dedicated, exactly-sized ArrayBuffer
+              parsedData.message = bytes;
               console.log(
                 "[MqttManager] Message received:",
                 parsedData.topic,
                 "(",
                 bytes.length,
-                "bytes, binary ArrayBuffer)",
+                "bytes, Uint8Array)",
               );
             } catch (decodeErr) {
               console.error(
@@ -261,8 +269,8 @@ export class MqttManager {
         for (let i = 0; i < len; i++) {
           binary += String.fromCharCode(bytes[i]);
         }
-        // Prefix with "B64:" to mark this as intentional Base64-encoded binary
-        publishMessage = "B64:" + btoa(binary);
+        // Prefix with marker to indicate this is intentional Base64-encoded binary
+        publishMessage = BINARY_MARKER + btoa(binary);
 
         console.log("[MqttManager] Converted binary to Base64 with marker:", {
           topic,

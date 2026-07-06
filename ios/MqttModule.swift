@@ -6,6 +6,11 @@ import os.log
 
 @objc(MqttModule)
 class MqttModule: RCTEventEmitter {
+    /// Prefix marker to distinguish intentional Base64-encoded binary messages
+    /// from plain text that happens to be valid Base64 (e.g., JSON strings).
+    /// Must match the prefix in JavaScript layer (MqttManager.ts).
+    private static let BINARY_MARKER = "B64:"
+
     private var mqttClient: CocoaMQTT?
     private var expectedBrokerCN: String?
     private var connectSuccessCallback: RCTResponseSenderBlock?
@@ -14,7 +19,7 @@ class MqttModule: RCTEventEmitter {
     private var clientIdentifier: String = ""
     private var connectionStartTime: Date?
     private var isAutoReconnectEnabled: Bool = false
-    
+
     private let logger = OSLog(subsystem: "com.neurio.generachome", category: "MqttModule")
     
     override init() {
@@ -351,11 +356,11 @@ class MqttModule: RCTEventEmitter {
         
         let mqttQos = CocoaMQTTQoS(rawValue: UInt8(qos)) ?? .qos1
 
-        // Check if message is marked as Base64-encoded binary (prefixed with "B64:")
+        // Check if message is marked as Base64-encoded binary
         // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
-        if message.hasPrefix("B64:") {
+        if message.hasPrefix(MqttModule.BINARY_MARKER) {
             // Remove marker and decode Base64
-            let base64String = String(message.dropFirst(4))
+            let base64String = String(message.dropFirst(MqttModule.BINARY_MARKER.count))
             if let binaryData = Data(base64Encoded: base64String) {
                 let payload = [UInt8](binaryData)
                 let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)

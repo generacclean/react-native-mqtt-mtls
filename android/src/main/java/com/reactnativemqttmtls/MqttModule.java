@@ -23,6 +23,12 @@ import javax.net.ssl.*;
 public class MqttModule extends ReactContextBaseJavaModule {
     private static final String TAG = "MqttModule";
     private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
+    /**
+     * Prefix marker to distinguish intentional Base64-encoded binary messages
+     * from plain text that happens to be valid Base64 (e.g., JSON strings).
+     * Must match the prefix in JavaScript layer (MqttManager.ts).
+     */
+    private static final String BINARY_MARKER = "B64:";
     private final ReactApplicationContext reactContext;
     private MqttAndroidClient client;
     private volatile boolean isAutoReconnectEnabled = false;
@@ -658,11 +664,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
             }
 
             byte[] payload;
-            // Check if message is marked as Base64-encoded binary (prefixed with "B64:")
+            // Check if message is marked as Base64-encoded binary
             // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
-            if (message.startsWith("B64:")) {
+            if (message.startsWith(BINARY_MARKER)) {
                 // Remove marker and decode Base64
-                String base64Data = message.substring(4);
+                String base64Data = message.substring(BINARY_MARKER.length());
                 payload = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP);
                 Log.d(TAG, "Publish: decoded marked Base64 message (" + payload.length + " bytes) for topic: " + topic);
             } else {
