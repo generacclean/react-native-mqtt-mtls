@@ -13,6 +13,9 @@ class MqttModule: RCTEventEmitter {
 
     /// Detects whether payload is binary data or UTF-8 text.
     /// Returns true if the data cannot be decoded as UTF-8.
+    ///
+    /// Note: Protobuf messages use varint encoding which produces invalid UTF-8 byte sequences,
+    /// so they are correctly detected as binary by this method.
     private func isBinaryData(_ data: Data) -> Bool {
         return String(data: data, encoding: .utf8) == nil
     }

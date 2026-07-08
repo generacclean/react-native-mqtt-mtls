@@ -42,8 +42,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
     /**
      * Detects whether payload is binary data or UTF-8 text.
-     * Returns true if the data cannot be decoded as UTF-8 or contains control characters
-     * (excluding whitespace).
+     * Returns true if the data cannot be decoded as UTF-8.
+     *
+     * Note: Protobuf messages use varint encoding which produces invalid UTF-8 byte sequences,
+     * so they are correctly detected as binary by this method.
      */
     private boolean isBinaryData(byte[] payload) {
         try {

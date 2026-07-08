@@ -270,6 +270,9 @@ export class MqttManager {
           binary += String.fromCharCode(bytes[i]);
         }
         // Prefix with marker to indicate this is intentional Base64-encoded binary
+        // Note: Publish path uses B64: prefix to signal intent on the wire,
+        // while receive path uses isBinary flag based on UTF-8 validity check.
+        // This asymmetry allows the receiver to handle messages from any publisher.
         publishMessage = BINARY_MARKER + btoa(binary);
 
         console.log("[MqttManager] Converted binary to Base64 with marker:", {

@@ -123,30 +123,35 @@ sequenceDiagram
     participant App as Installer App
     
     Broker->>Native: Binary Message (raw bytes)
-    Note over Native: Check if binary data
+    Note over Native: UTF-8 validity check
     
-    alt Binary Message
+    alt Binary Message (Invalid UTF-8)
         Native->>Native: Base64 encode
-        Native->>Native: Prepend "B64:"
-        Native->>Bridge: Send "B64:<base64>"
-        Bridge->>Manager: Receive marked string
-        Manager->>Manager: Detect "B64:" prefix
+        Native->>Bridge: {message: base64, isBinary: true}
+        Bridge->>Manager: Receive event data
+        Manager->>Manager: Check isBinary flag
         Manager->>Manager: Decode to Uint8Array
         Manager->>App: Uint8Array (binary)
-    else Text Message
-        Native->>Bridge: Send plain string
-        Bridge->>Manager: Receive string
+    else Text Message (Valid UTF-8)
+        Native->>Native: Decode as UTF-8 string
+        Native->>Bridge: {message: string, isBinary: false}
+        Bridge->>Manager: Receive event data
+        Manager->>Manager: Check isBinary flag
         Manager->>App: string (text)
     end
 ```
 
 **Key Steps**:
 1. **Native Layer**: Receives raw bytes from broker
-2. **Binary Detection**: Checks if message is binary (non-UTF8 or contains control characters)
-3. **Encoding**: Base64 encodes binary data and adds `B64:` marker
-4. **Transport**: Sends through React Native bridge (bridge only supports strings)
-5. **JavaScript Layer**: Detects marker, decodes to `Uint8Array`
+2. **Binary Detection**: Checks if payload is valid UTF-8 (protobuf uses varint encoding → invalid UTF-8)
+3. **Encoding**: Base64 encodes binary data, sends with `isBinary: true` flag
+4. **Transport**: Sends through React Native bridge as event with message + flag
+5. **JavaScript Layer**: Checks `isBinary` flag, decodes Base64 to `Uint8Array` if binary
 6. **Application**: Receives properly typed message
+
+**Note**: The receive path uses an `isBinary` flag rather than the `B64:` prefix used in publishing.
+This asymmetry allows the receiver to handle messages from any publisher, regardless of whether
+they use the `B64:` convention.
 
 ### Message Flow: App → Broker (Publishing Messages)
 
@@ -509,89 +514,104 @@ MqttManager.onMessage((topic, message) => {
 
 The React Native bridge **only supports string primitives** for native-to-JS communication. Binary data must be encoded for transport.
 
-### Solution: B64 Marker Protocol
+### Solution: Binary Flag Protocol (Receive) & B64 Marker (Publish)
 
 #### Encoding Strategy
-```
-Text Message:    "Hello, World!"
-Binary Message:  "B64:<base64-encoded-data>"
-```
+
+**Receive Path** (Broker → App):
+- Native detects binary via UTF-8 validity check
+- Sends Base64-encoded message with `isBinary` flag
+- JavaScript layer checks flag to decode correctly
+
+**Publish Path** (App → Broker):
+- JavaScript adds `B64:` prefix to binary messages
+- Native detects prefix, strips it, decodes Base64 to raw bytes
+- Sends raw bytes to broker
 
 #### Implementation Details
 
-##### 1. Native Layer (Android)
+##### 1. Native Layer (Android) - Receive
 ```java
 // MqttModule.java
-private static final String BINARY_MARKER = "B64:";
-
 private boolean isBinaryData(byte[] payload) {
     try {
         CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
         decoder.onMalformedInput(CodingErrorAction.REPORT);
         decoder.onUnmappableCharacter(CodingErrorAction.REPORT);
         decoder.decode(ByteBuffer.wrap(payload));
-        return false;  // Successfully decoded as UTF-8
+        return false;  // Successfully decoded as UTF-8 → text
     } catch (CharacterCodingException e) {
-        return true;  // Not valid UTF-8, treat as binary
+        return true;  // Not valid UTF-8 → binary
     }
 }
 
 @Override
-public void messageArrived(String topic, MqttMessage mqttMessage) {
-    byte[] payload = mqttMessage.getPayload();
-    String messageStr;
+public void messageArrived(String topic, MqttMessage message) {
+    byte[] payload = message.getPayload();
+    boolean isBinary = isBinaryData(payload);
     
-    if (isBinaryData(payload)) {
-        // Binary: Base64 encode with marker
-        String base64 = Base64.encodeToString(payload, Base64.NO_WRAP);
-        messageStr = BINARY_MARKER + base64;
+    WritableMap eventData = Arguments.createMap();
+    eventData.putString("topic", topic);
+    
+    if (isBinary) {
+        // Binary: Base64 encode for bridge transport
+        String payloadBase64 = Base64.encodeToString(payload, Base64.NO_WRAP);
+        eventData.putString("message", payloadBase64);
+        eventData.putBoolean("isBinary", true);
     } else {
-        // Text: Send as-is
-        messageStr = new String(payload, StandardCharsets.UTF_8);
+        // Text: Send as UTF-8 string
+        String messageStr = new String(payload, StandardCharsets.UTF_8);
+        eventData.putString("message", messageStr);
+        eventData.putBoolean("isBinary", false);
     }
     
-    sendMessageToJS(topic, messageStr);
+    reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+               .emit("MqttMessage", eventData);
 }
 ```
 
-##### 2. Native Layer (iOS)
+##### 2. Native Layer (iOS) - Receive
 ```swift
 // MqttModule.swift
-private static let BINARY_MARKER = "B64:"
-
 private func isBinaryData(_ data: Data) -> Bool {
     return String(data: data, encoding: .utf8) == nil
 }
 
-func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage) {
-    guard let data = message.payload else { return }
-    let topic = message.topic
-    let messageStr: String
+func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
+    let payloadData = Data(message.payload)
+    let isBinary = self.isBinaryData(payloadData)
     
-    if isBinaryData(data) {
-        // Binary: Base64 encode with marker
-        let base64 = data.base64EncodedString()
-        messageStr = Self.BINARY_MARKER + base64
+    var eventBody: [String: Any] = [
+        "topic": message.topic,
+        "qos": message.qos.rawValue
+    ]
+    
+    if isBinary {
+        // Binary: Base64 encode for bridge transport
+        let payloadBase64 = payloadData.base64EncodedString()
+        eventBody["message"] = payloadBase64
+        eventBody["isBinary"] = true
     } else {
-        // Text: Send as-is
-        messageStr = String(data: data, encoding: .utf8) ?? ""
+        // Text: Send as UTF-8 string
+        if let messageStr = String(data: payloadData, encoding: .utf8) {
+            eventBody["message"] = messageStr
+            eventBody["isBinary"] = false
+        }
     }
     
-    sendMessageToJS(topic: topic, message: messageStr)
+    self.sendEvent(withName: "MqttMessage", body: eventBody)
 }
 ```
 
-##### 3. JavaScript Layer
+##### 3. JavaScript Layer - Receive
 ```typescript
 // MqttManager.ts
-const BINARY_MARKER = "B64:";
-
-private handleMessage(topic: string, message: string): void {
+private handleMessage(parsedData: any): void {
   let processedMessage: string | Uint8Array;
   
-  if (message.startsWith(BINARY_MARKER)) {
+  if (parsedData.isBinary) {
     // Binary message: Decode from Base64
-    const base64Data = message.substring(BINARY_MARKER.length);
+    const base64Data = parsedData.message;
     const binaryString = atob(base64Data);
     const bytes = new Uint8Array(binaryString.length);
     
@@ -602,33 +622,61 @@ private handleMessage(topic: string, message: string): void {
     processedMessage = bytes;  // Uint8Array
   } else {
     // Text message: Use as-is
-    processedMessage = message;  // string
+    processedMessage = parsedData.message;  // string
   }
   
   this.messageCallback?.(topic, processedMessage);
 }
 ```
 
-### Data Flow Diagram
+##### 4. JavaScript Layer - Publish
+```typescript
+// MqttManager.ts - Publish path uses B64: marker
+const BINARY_MARKER = "B64:";
+
+publish(topic: string, message: string | Uint8Array, ...): Promise<void> {
+  let publishMessage = message;
+  
+  if (message instanceof Uint8Array || message instanceof ArrayBuffer) {
+    const bytes = message instanceof ArrayBuffer 
+      ? new Uint8Array(message) 
+      : message;
+    
+    // Convert to Base64 and add B64: marker
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    publishMessage = BINARY_MARKER + btoa(binary);
+  }
+  
+  // Send to native layer (which will detect B64: prefix and decode)
+  MqttModule.publish(topic, publishMessage, qos, retained, ...);
+}
+```
+
+**Note on Asymmetry**: The publish path adds a `B64:` prefix to signal binary intent on the wire, 
+while the receive path uses an `isBinary` flag based on UTF-8 validity. This design allows the 
+receiver to handle messages from any publisher, regardless of encoding convention.
+
+### Data Flow Diagram - Receive Path
 
 ```mermaid
 graph LR
     subgraph "Native Layer"
         A[Raw Bytes]
-        B{Binary<br/>Check}
+        B{UTF-8<br/>Valid?}
         C[UTF-8 String]
         D[Base64 Encode]
-        E[Add 'B64:' Marker]
     end
     
     subgraph "Bridge Transport"
-        F[String Only]
+        F[Event: {message, isBinary}]
     end
     
     subgraph "JavaScript Layer"
-        G{Starts with<br/>'B64:'?}
+        G{isBinary<br/>flag?}
         H[Use as Text]
-        I[Remove Marker]
         J[Base64 Decode]
         K[Uint8Array]
     end
@@ -639,15 +687,13 @@ graph LR
     end
     
     A --> B
-    B -->|Text| C
-    B -->|Binary| D
-    D --> E
+    B -->|Yes - Text| C
+    B -->|No - Binary| D
     C --> F
-    E --> F
+    D --> F
     F --> G
-    G -->|No| H
-    G -->|Yes| I
-    I --> J
+    G -->|false| H
+    G -->|true| J
     J --> K
     H --> L
     K --> M
