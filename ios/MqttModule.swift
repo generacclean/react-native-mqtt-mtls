@@ -27,6 +27,34 @@ class MqttModule: RCTEventEmitter {
     private var isAutoReconnectEnabled: Bool = false
 
     private let logger = OSLog(subsystem: "com.neurio.generachome", category: "MqttModule")
+
+    /// Wrapper class to ensure React Native callbacks are invoked exactly once.
+    /// Prevents crashes from React Native bridge's single-fire invariant violation.
+    private class CallbackGuard {
+        private var callback: RCTResponseSenderBlock?
+        private var hasFired = false
+        private let lock = NSLock()
+
+        init(_ callback: RCTResponseSenderBlock?) {
+            self.callback = callback
+        }
+
+        func invoke(_ args: [Any]) {
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard !hasFired, let callback = callback else {
+                if hasFired {
+                    os_log("Suppressed duplicate callback invocation", type: .default)
+                }
+                return
+            }
+
+            hasFired = true
+            self.callback = nil
+            callback(args)
+        }
+    }
     
     override init() {
         super.init()
@@ -100,6 +128,8 @@ class MqttModule: RCTEventEmitter {
         successCallback: @escaping RCTResponseSenderBlock,
         errorCallback: @escaping RCTResponseSenderBlock
     ) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
         // Ensure clean slate before new connection
         if mqttClient != nil {
             os_log("Found existing client, cleaning up before new connection...", log: logger, type: .info)
@@ -144,7 +174,7 @@ class MqttModule: RCTEventEmitter {
                   let keyAlias = privateKeyAlias else {
                 let error = "Missing required parameters (clientCert, privateKeyAlias, or rootCa)"
                 os_log("ERROR: %{public}@", log: logger, type: .error, error)
-                errorCallback([error])
+                errorGuard.invoke([error])
                 return
             }
             
@@ -245,8 +275,8 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
-            self.connectSuccessCallback = successCallback
-            self.connectErrorCallback = errorCallback
+            self.connectSuccessCallback = { args in successGuard.invoke(args) }
+            self.connectErrorCallback = { args in errorGuard.invoke(args) }
             self.brokerUrl = broker
             self.clientIdentifier = clientId
             self.mqttClient = client
@@ -265,7 +295,7 @@ class MqttModule: RCTEventEmitter {
                 os_log("  - Waiting for delegate callbacks...", log: logger, type: .info)
             } else {
                 os_log("✗ Connection initiation FAILED", log: logger, type: .error)
-                errorCallback(["Failed to start connection - client.connect() returned false"])
+                errorGuard.invoke(["Failed to start connection - client.connect() returned false"])
             }
             
             os_log("═══════════════════════════════════════════════════════", log: logger, type: .info)
@@ -280,7 +310,7 @@ class MqttModule: RCTEventEmitter {
             os_log("Error domain: %{public}@", log: logger, type: .error, (error as NSError).domain)
             os_log("Error code: %d", log: logger, type: .error, (error as NSError).code)
             os_log("", log: logger, type: .error)
-            errorCallback([error.localizedDescription])
+            errorGuard.invoke([error.localizedDescription])
         }
     }
     
@@ -317,46 +347,55 @@ class MqttModule: RCTEventEmitter {
     func subscribe(_ topic: String, qos: NSInteger,
                   successCallback: @escaping RCTResponseSenderBlock,
                   errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("SUBSCRIBE: topic=%{public}@, qos=%d", log: logger, type: .info, topic, qos)
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Subscribe failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
-        
+
         let mqttQos = CocoaMQTTQoS(rawValue: UInt8(qos)) ?? .qos1
         client.subscribe(topic, qos: mqttQos)
         os_log("✓ Subscribe request sent", log: logger, type: .info)
-        successCallback(["Subscribed to \(topic)"])
+        successGuard.invoke(["Subscribed to \(topic)"])
     }
     
     @objc
     func unsubscribe(_ topic: String,
                     successCallback: @escaping RCTResponseSenderBlock,
                     errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("UNSUBSCRIBE: topic=%{public}@", log: logger, type: .info, topic)
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Unsubscribe failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
-        
+
         client.unsubscribe(topic)
         os_log("✓ Unsubscribe request sent", log: logger, type: .info)
-        successCallback(["Unsubscribed from \(topic)"])
+        successGuard.invoke(["Unsubscribed from \(topic)"])
     }
     
     @objc
     func publish(_ topic: String, message: String, qos: NSInteger, retained: Bool,
                 successCallback: @escaping RCTResponseSenderBlock,
                 errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("PUBLISH: topic=%{public}@, qos=%d, retained=%{public}@", log: logger, type: .info, topic, qos, String(retained))
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Publish failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
         
@@ -374,7 +413,7 @@ class MqttModule: RCTEventEmitter {
                 os_log("✓ Published marked Base64 binary data (%d bytes)", log: logger, type: .info, payload.count)
             } else {
                 os_log("✗ Failed to decode Base64 message", log: logger, type: .error)
-                errorCallback(["Failed to decode Base64 message"])
+                errorGuard.invoke(["Failed to decode Base64 message"])
                 return
             }
         } else {
@@ -386,12 +425,12 @@ class MqttModule: RCTEventEmitter {
                 os_log("✓ Published UTF-8 text data (%d bytes)", log: logger, type: .info, payload.count)
             } else {
                 os_log("✗ Failed to encode message as UTF-8", log: logger, type: .error)
-                errorCallback(["Failed to encode message as UTF-8"])
+                errorGuard.invoke(["Failed to encode message as UTF-8"])
                 return
             }
         }
-        
-        successCallback(["Published to \(topic)"])
+
+        successGuard.invoke(["Published to \(topic)"])
     }
     
     @objc

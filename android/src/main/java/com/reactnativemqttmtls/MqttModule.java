@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.*;
 
 public class MqttModule extends ReactContextBaseJavaModule {
@@ -73,6 +74,29 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.d(TAG, "BouncyCastle provider initialized");
         } catch (Exception e) {
             Log.e(TAG, "Failed to register BouncyCastle provider", e);
+        }
+    }
+
+    /**
+     * Safely invoke a React Native Callback exactly once, even if called multiple times.
+     * Prevents native crash (SIGABRT) from React Native bridge's single-fire invariant violation.
+     *
+     * @param callback The callback to invoke
+     * @param fired AtomicBoolean guard to ensure single invocation
+     * @param args Arguments to pass to the callback
+     */
+    private void safeInvoke(Callback callback, AtomicBoolean fired, Object... args) {
+        if (callback == null) {
+            return;
+        }
+        if (fired.compareAndSet(false, true)) {
+            try {
+                callback.invoke(args);
+            } catch (Exception e) {
+                Log.e(TAG, "Callback invoke error", e);
+            }
+        } else {
+            Log.w(TAG, "Suppressed duplicate callback invocation");
         }
     }
 
@@ -340,6 +364,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             boolean isAdminUser,
             final Callback success,
             final Callback error) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             // Clean up any existing connection before creating a new one
             if (client != null) {
@@ -451,13 +476,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "MQTT CONNECTION SUCCESSFUL");
-                    if (success != null) {
-                        try {
-                            success.invoke("Connected");
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error invoking success callback", e);
-                        }
-                    }
+                    safeInvoke(success, callbackFired, "Connected");
                 }
 
                 @Override
@@ -474,25 +493,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
                         Log.e(TAG, "MQTT CONNECTION FAILED: Unknown error");
                     }
 
-                    if (error != null) {
-                        try {
-                            error.invoke(errorMessage);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error invoking error callback", e);
-                        }
-                    }
+                    safeInvoke(error, callbackFired, errorMessage);
                 }
             });
         } catch (Exception e) {
             Log.e(TAG, "MQTT setup error", e);
             e.printStackTrace();
-            if (error != null) {
-                try {
-                    error.invoke(e.getMessage() != null ? e.getMessage() : "Setup failed");
-                } catch (Exception callbackException) {
-                    Log.e(TAG, "Error invoking error callback", callbackException);
-                }
-            }
+            safeInvoke(error, callbackFired, e.getMessage() != null ? e.getMessage() : "Setup failed");
         }
     }
 
@@ -625,6 +632,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void subscribe(String topic, int qos, Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
@@ -634,31 +642,26 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "Subscribed to: " + topic);
-                    if (successCallback != null) {
-                        successCallback.invoke("Subscribed to " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Subscribed to " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Subscribe failed";
                     Log.e(TAG, "Subscribe failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Subscribe failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Subscribe error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Subscribe failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + e.getMessage());
         }
     }
 
     @ReactMethod
     public void unsubscribe(String topic, Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
@@ -668,32 +671,27 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "Unsubscribed from: " + topic);
-                    if (successCallback != null) {
-                        successCallback.invoke("Unsubscribed from " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Unsubscribed from " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Unsubscribe failed";
                     Log.e(TAG, "Unsubscribe failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Unsubscribe failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Unsubscribe error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Unsubscribe failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + e.getMessage());
         }
     }
 
     @ReactMethod
     public void publish(String topic, String message, int qos, boolean retained,
             Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
@@ -720,26 +718,20 @@ public class MqttModule extends ReactContextBaseJavaModule {
             client.publish(topic, mqttMessage, null, new IMqttActionListener() {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
-                    if (successCallback != null) {
-                        successCallback.invoke("Published to " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Published to " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Publish failed";
                     Log.e(TAG, "Publish failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Publish failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Publish failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Publish error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Publish failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Publish failed: " + e.getMessage());
         }
     }
 
