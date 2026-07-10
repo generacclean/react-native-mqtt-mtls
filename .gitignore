@@ -143,4 +143,5 @@ vite.config.ts.timestamp-*
 .vite/
 
 /android/.gradle/
+/android/build/
 .DS_Store

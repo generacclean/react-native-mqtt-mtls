@@ -1,13 +1,18 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { NativeEventEmitter } from "react-native";
+import React, { useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import { NativeEventEmitter, EmitterSubscription } from "react-native";
 import { MqttContext } from "./MqttContext";
 import MqttModule from "./MqttModule";
+import type { MqttConfig, MqttMessage } from "./types";
 
-export const MqttProvider = ({ children }) => {
+interface MqttProviderProps {
+  children: ReactNode;
+}
+
+export const MqttProvider = ({ children }: MqttProviderProps) => {
   const [isConnected, setIsConnected] = useState(false);
-  const [error, setError] = useState(null);
-  const configRef = useRef(null);
-  const eventEmitterRef = useRef(null);
+  const [error, setError] = useState<string | null>(null);
+  const configRef = useRef<MqttConfig | null>(null);
+  const eventEmitterRef = useRef<NativeEventEmitter | null>(null);
 
   useEffect(() => {
     // Cleanup any stale MQTT connections from previous app sessions
@@ -39,13 +44,13 @@ export const MqttProvider = ({ children }) => {
     }
 
     // Create event emitter for MQTT events
-    eventEmitterRef.current = new NativeEventEmitter(MqttModule);
+    eventEmitterRef.current = new NativeEventEmitter(MqttModule as any);
 
-    const subscriptions = [];
+    const subscriptions: EmitterSubscription[] = [];
 
     // Subscribe to MQTT events
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttConnected", (message) => {
+      eventEmitterRef.current.addListener("MqttConnected", (message: string) => {
         console.log("MQTT Connected:", message);
         setIsConnected(true);
         setError(null);
@@ -56,7 +61,7 @@ export const MqttProvider = ({ children }) => {
     );
 
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttDisconnected", (message) => {
+      eventEmitterRef.current.addListener("MqttDisconnected", (message: string) => {
         console.log("MQTT Disconnected:", message);
         setIsConnected(false);
         if (configRef.current?.onConnectionLost) {
@@ -66,7 +71,7 @@ export const MqttProvider = ({ children }) => {
     );
 
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttMessage", (data) => {
+      eventEmitterRef.current.addListener("MqttMessage", (data: any) => {
         try {
           const parsedData = typeof data === "string" ? JSON.parse(data) : data;
 
@@ -112,7 +117,7 @@ export const MqttProvider = ({ children }) => {
     );
 
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttDeliveryComplete", (message) => {
+      eventEmitterRef.current.addListener("MqttDeliveryComplete", (message: string) => {
         console.log("MQTT Delivery Complete:", message);
       }),
     );
@@ -138,7 +143,7 @@ export const MqttProvider = ({ children }) => {
     };
   }, []);
 
-  const connect = useCallback(async (config) => {
+  const connect = useCallback(async (config: MqttConfig): Promise<void> => {
     try {
       configRef.current = config;
       return new Promise((resolve, reject) => {
@@ -150,11 +155,11 @@ export const MqttProvider = ({ children }) => {
           config.brokerIp ?? null,
           config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
           config.isAdminUser ?? true,
-          (success) => {
+          (success: string) => {
             console.log("Connect success:", success);
-            resolve(success);
+            resolve();
           },
-          (error) => {
+          (error: string) => {
             console.error("Connect error:", error);
             setError(error);
             if (config.onError) {
@@ -165,7 +170,8 @@ export const MqttProvider = ({ children }) => {
         );
       });
     } catch (err) {
-      setError(err.message);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage);
       throw err;
     }
   }, []);
@@ -187,16 +193,16 @@ export const MqttProvider = ({ children }) => {
     });
   }, []);
 
-  const subscribe = useCallback(async (topic, qos = 1) => {
+  const subscribe = useCallback(async (topic: string, qos = 1): Promise<void> => {
     return new Promise((resolve, reject) => {
       MqttModule.subscribe(
         topic,
         qos,
-        (success) => {
+        (success: string) => {
           console.log("Subscribe success:", success);
-          resolve(success);
+          resolve();
         },
-        (error) => {
+        (error: string) => {
           console.error("Subscribe error:", error);
           reject(error);
         },
@@ -204,15 +210,15 @@ export const MqttProvider = ({ children }) => {
     });
   }, []);
 
-  const unsubscribe = useCallback(async (topic) => {
+  const unsubscribe = useCallback(async (topic: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       MqttModule.unsubscribe(
         topic,
-        (success) => {
+        (success: string) => {
           console.log("Unsubscribe success:", success);
-          resolve(success);
+          resolve();
         },
-        (error) => {
+        (error: string) => {
           console.error("Unsubscribe error:", error);
           reject(error);
         },
@@ -221,7 +227,7 @@ export const MqttProvider = ({ children }) => {
   }, []);
 
   const publish = useCallback(
-    async (topic, message, qos = 1, retained = false) => {
+    async (topic: string, message: string | Uint8Array | ArrayBuffer, qos = 1, retained = false): Promise<void> => {
       return new Promise((resolve, reject) => {
         let publishMessage = message;
 

@@ -25,7 +25,10 @@ export class MqttManager {
 
   private constructor() {
     this.setupEventEmitter();
-    this.performInitialCleanup();
+    // Skip cleanup in test environment (process.env.NODE_ENV === 'test')
+    if (process.env.NODE_ENV !== 'test') {
+      this.performInitialCleanup();
+    }
   }
 
   public static get Instance(): MqttManager {
@@ -62,7 +65,7 @@ export class MqttManager {
   }
 
   private setupEventEmitter(): void {
-    this.eventEmitter = new NativeEventEmitter(MqttModule);
+    this.eventEmitter = new NativeEventEmitter(MqttModule as any);
 
     this.subscriptions.push(
       this.eventEmitter.addListener("MqttConnected", (message) => {
