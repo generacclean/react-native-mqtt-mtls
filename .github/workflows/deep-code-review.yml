@@ -171,9 +171,9 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::017820692424:role/claude-pr-review-ai-dev-oidc-role-neurio
+          role-to-assume: arn:aws:iam::017820692424:role/GitHubClaudeBedrockRoleGeneracClean
           aws-region: us-east-1
-          role-session-name: GitHubDeepReviewSession
+          role-session-name: GitHubClaudeSession
 
       - name: Run Deep Code Review
         uses: anthropics/claude-code-action@v1
@@ -185,4 +185,4 @@ jobs:
           claude_args: |
             --model us.anthropic.claude-sonnet-4-6
             --max-turns 80
-            --allowedTools "Agent,Read,Glob,Grep,Bash(git rev-parse:*),Bash(git log:*),Bash(git diff:*),Bash(git fetch:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "Agent,Read,Glob,Grep,Bash(git rev-parse:*),Bash(git log:*),Bash(git diff:*),Bash(git fetch:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),mcp__github__create_inline_comment,mcp__github__create_comment"
