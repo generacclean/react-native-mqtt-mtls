@@ -9,7 +9,16 @@ export interface MqttCertificates {
   clientCert: string;
   privateKeyAlias: string;
   rootCa: string;
-  useHardwareKey: boolean;
+  /**
+   * Hardware-backed keys are not supported for mTLS.
+   * Hardware keys in AndroidKeyStore fail during TLS handshake because
+   * Conscrypt requires extractable key material for ECDHE operations, but
+   * hardware keys are non-extractable by design.
+   *
+   * Must be false or omitted. Throws error if true.
+   * @default false
+   */
+  useHardwareKey?: boolean;
 }
 
 export interface MqttConfig {

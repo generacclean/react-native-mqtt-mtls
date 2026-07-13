@@ -36,6 +36,15 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * Must match the prefix in JavaScript layer (MqttManager.ts).
      */
     private static final String BINARY_MARKER = "B64:";
+
+    // Keep a direct reference to our full BouncyCastle provider instance
+    // to avoid getting the system's stripped-down BC provider
+    private static final Provider FULL_BC_PROVIDER = new BouncyCastleProvider();
+
+    // Thread-safe provider initialization
+    private static volatile boolean providerInitialized = false;
+    private static final Object providerLock = new Object();
+
     private final ReactApplicationContext reactContext;
     private MqttAndroidClient client;
     private volatile boolean isAutoReconnectEnabled = false;
@@ -70,12 +79,37 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     private void setupBouncyCastle() {
-        try {
-            Security.removeProvider("BC");
-            Security.addProvider(new BouncyCastleProvider());
-            Log.d(TAG, "BouncyCastle provider initialized");
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to register BouncyCastle provider", e);
+        // Fast path - if already initialized, return immediately
+        if (providerInitialized) {
+            return;
+        }
+
+        // Slow path - synchronize and initialize
+        synchronized (providerLock) {
+            // Double-check after acquiring lock
+            if (providerInitialized) {
+                return;
+            }
+
+            try {
+                // Remove the system's stripped BC provider if it exists
+                Provider systemBcProvider = Security.getProvider("BC");
+                if (systemBcProvider != null && systemBcProvider.getClass().getName().startsWith("com.android.org.bouncycastle")) {
+                    Log.d(TAG, "Found Android system BC provider (stripped): " + systemBcProvider.getClass().getName());
+                    Log.d(TAG, "Removing system BC provider to avoid conflicts");
+                    Security.removeProvider("BC");
+                }
+
+                // Register our full BouncyCastle provider at position 1 (highest priority)
+                Security.insertProviderAt(FULL_BC_PROVIDER, 1);
+                Log.d(TAG, "BouncyCastle provider initialized at position 1");
+                Log.d(TAG, "BC Provider version: " + FULL_BC_PROVIDER.getVersion());
+
+                // Mark as initialized
+                providerInitialized = true;
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to register BouncyCastle provider", e);
+            }
         }
     }
 
@@ -382,6 +416,19 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     ? certificates.getBoolean("useHardwareKey")
                     : false;
 
+            // Hardware-backed keys are not supported for mTLS.
+            // Hardware keys in AndroidKeyStore fail during TLS handshake because
+            // Conscrypt requires extractable key material for ECDHE operations, but
+            // hardware keys are non-extractable by design.
+            if (useHardwareKey) {
+                throw new IllegalArgumentException(
+                    "Hardware-backed keys are not supported for mTLS. " +
+                    "Hardware keys fail during TLS handshake because Conscrypt requires " +
+                    "extractable key material for ECDHE operations, but hardware keys are " +
+                    "non-extractable by design. Please use software-backed keys (useHardwareKey: false)."
+                );
+            }
+
             if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
                 throw new IllegalArgumentException("privateKeyAlias required");
             }
@@ -399,7 +446,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.i(TAG, "Admin user: " + isAdminUser);
             Log.i(TAG, "SNI host: " + (effectiveSniHost != null ? effectiveSniHost : "N/A (admin)"));
             Log.i(TAG, "Expected broker CN: " + (effectiveBrokerCN != null ? effectiveBrokerCN : "N/A (admin)"));
-            Log.i(TAG, "Key: " + privateKeyAlias + " (" + (useHardwareKey ? "hardware" : "software") + ")");
+            Log.i(TAG, "Key: " + privateKeyAlias + " (software)");
 
             client = new MqttAndroidClient(
                     getReactApplicationContext(),
@@ -416,7 +463,6 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("clientCert"),
                     certificates.getString("rootCa"),
                     privateKeyAlias,
-                    useHardwareKey,
                     effectiveBrokerCN);  // null for admin — skips CN validation
 
             options.setSocketFactory(sslContext.getSocketFactory());
@@ -513,10 +559,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String clientPem,
             String rootPem,
             String privateKeyAlias,
-            boolean useHardwareKey,
             String expectedBrokerCN) throws Exception {
 
-        Log.d(TAG, "Creating SSL context (" + (useHardwareKey ? "hardware" : "software") + " key)");
+        Log.d(TAG, "Creating SSL context with software-backed key");
 
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
 
@@ -539,55 +584,36 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
         X509Certificate[] certChain = certChainList.toArray(new X509Certificate[0]);
 
-        // Load private key
-        PrivateKey privateKey;
-        PublicKey publicKey;
+        // Load private key from software keystore (PKCS12)
+        // Always use software-backed keys for TLS mTLS compatibility.
+        // Hardware-backed keys in AndroidKeyStore fail during TLS handshake because
+        // Conscrypt requires extractable key material for ECDHE operations, but
+        // hardware keys are non-extractable by design.
+        String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
+        KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
 
-        if (useHardwareKey) {
-            KeyStore androidKeyStore = KeyStore.getInstance("AndroidKeyStore");
-            androidKeyStore.load(null);
-
-            if (!androidKeyStore.containsAlias(privateKeyAlias)) {
-                throw new KeyException("Hardware key not found: " + privateKeyAlias);
-            }
-
-            KeyStore.Entry entry = androidKeyStore.getEntry(privateKeyAlias, null);
-            if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
-                throw new KeyException("Not a private key entry");
-            }
-
-            KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-            privateKey = privateKeyEntry.getPrivateKey();
-            publicKey = privateKeyEntry.getCertificate().getPublicKey();
-
-            Log.d(TAG, "Loaded hardware-backed key");
-
-        } else {
-            String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-            FileInputStream fis = new FileInputStream(keystorePath);
-
-            KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+        // Load keystore with try-with-resources to ensure FileInputStream is closed
+        try (FileInputStream fis = new FileInputStream(keystorePath)) {
             softwareKeyStore.load(fis, "".toCharArray());
-            fis.close();
-
-            if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
-                throw new KeyException("Software key not found: " + privateKeyAlias);
-            }
-
-            KeyStore.Entry entry = softwareKeyStore.getEntry(
-                    privateKeyAlias,
-                    new KeyStore.PasswordProtection("".toCharArray()));
-
-            if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
-                throw new KeyException("Not a private key entry");
-            }
-
-            KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-            privateKey = privateKeyEntry.getPrivateKey();
-            publicKey = privateKeyEntry.getCertificate().getPublicKey();
-
-            Log.d(TAG, "Loaded software key");
         }
+
+        if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
+            throw new KeyException("Software key not found: " + privateKeyAlias);
+        }
+
+        KeyStore.Entry entry = softwareKeyStore.getEntry(
+                privateKeyAlias,
+                new KeyStore.PasswordProtection("".toCharArray()));
+
+        if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
+            throw new KeyException("Not a private key entry");
+        }
+
+        KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+        PrivateKey privateKey = privateKeyEntry.getPrivateKey();
+        PublicKey publicKey = privateKeyEntry.getCertificate().getPublicKey();
+
+        Log.d(TAG, "Loaded software-backed key from PKCS12 keystore");
 
         // Verify certificate matches key
         verifyCertMatchesKey(clientCert, publicKey);
