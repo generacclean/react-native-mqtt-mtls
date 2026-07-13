@@ -299,6 +299,11 @@ This error occurs when trying to create multiple MQTT clients. The Context Provi
 2. Verify certificates haven't expired
 3. Check that private key matches the client certificate
 
+## Documentation
+
+- **[Architecture Guide](docs/ARCHITECTURE.md)**: Detailed architecture, message flow, and binary handling
+- **[API Reference](docs/API.md)**: Full API documentation (coming soon)
+
 ## Example App
 
 See the `example/` directory for a complete working example.

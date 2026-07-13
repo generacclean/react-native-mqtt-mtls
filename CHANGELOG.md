@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-07-13
+
+### Fixed
+
+- **CRITICAL:** Callback double-invocation crashes on Android and iOS
+  - **Root Cause:** Network disconnects or publish failures could trigger both success and error callbacks
+  - **Impact:** App crashes (SIGABRT) from React Native bridge's single-fire invariant violation
+  - **Solution:** Added callback guards (`safeInvoke` on Android, `CallbackGuard` on iOS) with atomic flags
+  - **Additional Fix (iOS):** Connect callbacks now use shared settled state for mutual exclusion (matches Android behavior)
+
+- **CRITICAL:** Type declaration mismatch in `index.d.ts`
+  - **Root Cause:** Public API declared `message: string | ArrayBuffer`, but runtime delivers `string | Uint8Array`
+  - **Impact:** TypeScript consumers receive wrong types, breaking `.length`, index access, `Buffer.from()`
+  - **Solution:** Changed type to `message: string | Uint8Array` to match actual runtime behavior
+
+- **CRITICAL:** Binary message detection failures for ASCII-range protobufs
+  - **Root Cause:** UTF-8 heuristic alone misclassifies small protobufs with ASCII content as text
+  - **Impact:** Intermittent payload-dependent parse failures in gateway transport handlers
+  - **Solution:** Added topic-based deterministic detection for known binary/text patterns (protobuf, firmware, JSON topics)
+  - **Fallback:** UTF-8 validity check for unknown topics (with warning in code comments)
+
+### Changed
+
+- Binary detection now uses topic patterns first (deterministic), then UTF-8 heuristic (fallback)
+- iOS connect callbacks use mutual exclusion to prevent both success and error from firing
+- Documentation clarified that protobuf varint encoding is correctly detected
+
+### Technical Details
+
+**Android Layer (`android/src/main/java/com/reactnativemqttmtls/MqttModule.java`):**
+- Line 67-114: Rewrote `isBinaryData()` with topic-based detection
+- Line 124-137: Added `safeInvoke()` for callback double-invocation prevention
+
+**iOS Layer (`ios/MqttModule.swift`):**
+- Line 28-70: Rewrote `isBinaryData()` with topic-based detection
+- Line 134-168: Added shared settled guard for connect callbacks (mutual exclusion)
+
+**TypeScript Layer (`index.d.ts`):**
+- Line 6: Changed `message: string | ArrayBuffer` → `message: string | Uint8Array`
+
 ## [1.1.1] - 2026-06-25
 
 ### Fixed

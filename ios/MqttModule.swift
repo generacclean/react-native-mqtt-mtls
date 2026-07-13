@@ -11,12 +11,50 @@ class MqttModule: RCTEventEmitter {
     /// Must match the prefix in JavaScript layer (MqttManager.ts).
     private static let BINARY_MARKER = "B64:"
 
-    /// Detects whether payload is binary data or UTF-8 text.
-    /// Returns true if the data cannot be decoded as UTF-8.
+    /// Detects whether a message is binary based on topic pattern and payload inspection.
     ///
-    /// Note: Protobuf messages use varint encoding which produces invalid UTF-8 byte sequences,
-    /// so they are correctly detected as binary by this method.
-    private func isBinaryData(_ data: Data) -> Bool {
+    /// CRITICAL: UTF-8 heuristic alone is insufficient for protobuf detection because small
+    /// protobufs with ASCII serial numbers and low field tags can be valid UTF-8, causing
+    /// misclassification that leads to parse failures in downstream handlers.
+    ///
+    /// Detection strategy:
+    /// 1. Topic-based (deterministic): Known binary topics are always treated as binary
+    /// 2. Content-based (fallback): UTF-8 validity check for unknown topics
+    ///
+    /// - Parameters:
+    ///   - topic: The MQTT topic (used for pattern matching)
+    ///   - data: The message payload bytes
+    /// - Returns: true if message should be treated as binary, false for text
+    private func isBinaryData(topic: String, data: Data) -> Bool {
+        // DETERMINISTIC: Topic-based detection for known binary message patterns
+        // These topics carry protobuf or firmware data and must always be binary
+
+        // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+        if topic.contains("/proto/") ||
+           topic.contains("/device") ||
+           topic.contains("/rma") ||
+           topic.contains("/assembly") ||
+           topic.contains("/installed") {
+            return true
+        }
+
+        // Firmware update topics
+        if topic.contains("/firmware") ||
+           topic.contains("/ota") ||
+           topic.contains("/upload") {
+            return true
+        }
+
+        // Text topics (JSON status, configuration, commands)
+        if topic.contains("/status") ||
+           topic.contains("/config") ||
+           topic.contains("/command") ||
+           topic.contains("/json") {
+            return false
+        }
+
+        // FALLBACK: UTF-8 heuristic for unknown topics
+        // Warning: This can misclassify ASCII-range protobufs as text
         return String(data: data, encoding: .utf8) == nil
     }
 
@@ -131,8 +169,41 @@ class MqttModule: RCTEventEmitter {
         successCallback: @escaping RCTResponseSenderBlock,
         errorCallback: @escaping RCTResponseSenderBlock
     ) {
-        let successGuard = CallbackGuard(successCallback)
-        let errorGuard = CallbackGuard(errorCallback)
+        // Use a shared settled flag to ensure exactly one callback fires (success OR error, not both)
+        // This provides mutual exclusion matching Android's single AtomicBoolean behavior
+        var settled = false
+        let settledLock = NSLock()
+
+        let successGuard = CallbackGuard { args in
+            settledLock.lock()
+            let wasSettled = settled
+            if !wasSettled {
+                settled = true
+            }
+            settledLock.unlock()
+
+            if !wasSettled {
+                successCallback(args)
+            } else {
+                os_log("Suppressed success callback - connect already settled", type: .default)
+            }
+        }
+
+        let errorGuard = CallbackGuard { args in
+            settledLock.lock()
+            let wasSettled = settled
+            if !wasSettled {
+                settled = true
+            }
+            settledLock.unlock()
+
+            if !wasSettled {
+                errorCallback(args)
+            } else {
+                os_log("Suppressed error callback - connect already settled", type: .default)
+            }
+        }
+
         // Ensure clean slate before new connection
         if mqttClient != nil {
             os_log("Found existing client, cleaning up before new connection...", log: logger, type: .info)
@@ -876,7 +947,7 @@ extension MqttModule: CocoaMQTTDelegate {
         os_log("DELEGATE: didReceiveMessage (id=%d, topic=%{public}@, size=%d bytes)", log: logger, type: .info, id, message.topic, message.payload.count)
 
         let payloadData = Data(message.payload)
-        let isBinary = self.isBinaryData(payloadData)
+        let isBinary = self.isBinaryData(topic: message.topic, data: payloadData)
 
         var eventBody: [String: Any] = [
             "topic": message.topic,

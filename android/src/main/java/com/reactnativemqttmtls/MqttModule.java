@@ -50,13 +50,51 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private volatile boolean isAutoReconnectEnabled = false;
 
     /**
-     * Detects whether payload is binary data or UTF-8 text.
-     * Returns true if the data cannot be decoded as UTF-8.
+     * Detects whether a message is binary based on topic pattern and payload inspection.
      *
-     * Note: Protobuf messages use varint encoding which produces invalid UTF-8 byte sequences,
-     * so they are correctly detected as binary by this method.
+     * CRITICAL: UTF-8 heuristic alone is insufficient for protobuf detection because small
+     * protobufs with ASCII serial numbers and low field tags can be valid UTF-8, causing
+     * misclassification that leads to parse failures in downstream handlers.
+     *
+     * Detection strategy:
+     * 1. Topic-based (deterministic): Known binary topics are always treated as binary
+     * 2. Content-based (fallback): UTF-8 validity check for unknown topics
+     *
+     * @param topic The MQTT topic (used for pattern matching)
+     * @param payload The message payload bytes
+     * @return true if message should be treated as binary, false for text
      */
-    private boolean isBinaryData(byte[] payload) {
+    private boolean isBinaryData(String topic, byte[] payload) {
+        // DETERMINISTIC: Topic-based detection for known binary message patterns
+        // These topics carry protobuf or firmware data and must always be binary
+        if (topic != null) {
+            // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+            if (topic.contains("/proto/") ||
+                topic.contains("/device") ||
+                topic.contains("/rma") ||
+                topic.contains("/assembly") ||
+                topic.contains("/installed")) {
+                return true;
+            }
+
+            // Firmware update topics
+            if (topic.contains("/firmware") ||
+                topic.contains("/ota") ||
+                topic.contains("/upload")) {
+                return true;
+            }
+
+            // Text topics (JSON status, configuration, commands)
+            if (topic.contains("/status") ||
+                topic.contains("/config") ||
+                topic.contains("/command") ||
+                topic.contains("/json")) {
+                return false;
+            }
+        }
+
+        // FALLBACK: UTF-8 heuristic for unknown topics
+        // Warning: This can misclassify ASCII-range protobufs as text
         try {
             CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
             decoder.onMalformedInput(CodingErrorAction.REPORT);
@@ -485,7 +523,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 public void messageArrived(String topic, MqttMessage message) {
                     try {
                         byte[] payload = message.getPayload();
-                        boolean isBinary = isBinaryData(payload);
+                        boolean isBinary = isBinaryData(topic, payload);
 
                         WritableMap eventData = Arguments.createMap();
                         eventData.putString("topic", topic);
