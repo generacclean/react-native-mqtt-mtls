@@ -349,8 +349,8 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
-            self.connectSuccessCallback = { args in successGuard.invoke(args) }
-            self.connectErrorCallback = { args in errorGuard.invoke(args) }
+            self.connectSuccessCallback = { args in successGuard.invoke(args ?? []) }
+            self.connectErrorCallback = { args in errorGuard.invoke(args ?? []) }
             self.brokerUrl = broker
             self.clientIdentifier = clientId
             self.mqttClient = client
