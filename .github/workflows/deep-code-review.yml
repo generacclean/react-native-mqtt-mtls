@@ -36,147 +36,38 @@ jobs:
             --json number,headRefName \
             --jq '"number=\(.number)\nhead_ref=\(.headRefName)"' >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ steps.pr.outputs.head_ref }}
           fetch-depth: 0
 
       - name: Build review prompt
         id: prompt
+        env:
+          PROMPT_FILE: .github/ai-review/deep-review-prompt.md
         run: |
+          if [ ! -f "$PROMPT_FILE" ]; then
+            echo "::error::Deep review prompt file $PROMPT_FILE not found."
+            exit 1
+          fi
           pr_number="${{ steps.pr.outputs.number }}"
+          delimiter="DEEP_REVIEW_PROMPT_EOF_${RANDOM}"
           {
-            echo 'prompt<<DEEP_REVIEW_PROMPT_EOF'
-            echo 'You are running a deep code review in CI for react-native-mqtt-mtls.'
-            echo ''
-            echo "PR NUMBER: ${pr_number}"
-            echo ''
-            echo '## Review Strategy'
-            echo ''
-            echo 'Spawn 5 specialized agents in parallel to review different dimensions:'
-            echo ''
-            echo '1. **intent-reviewer** - Verify changes match PR intent/title'
-            echo '2. **clarity-reviewer** - Check code readability and maintainability'
-            echo '3. **robustness-reviewer** - Find edge cases, error handling gaps, memory leaks'
-            echo '4. **consistency-reviewer** - Check native patterns, callback guards, type consistency'
-            echo '5. **completeness-reviewer** - Verify tests, docs, CHANGELOG updated'
-            echo ''
-            echo '## Agent Definitions'
-            echo ''
-            echo '### intent-reviewer'
-            echo 'Verify the changes align with PR title and description. Check if commits match stated intent.'
-            echo 'Focus: scope creep, unrelated changes, missing features from description'
-            echo 'Model: sonnet (fast, intent is usually clear)'
-            echo ''
-            echo '### clarity-reviewer'
-            echo 'Assess code readability, naming, structure, comments.'
-            echo 'Focus: confusing logic, misleading names, missing comments for non-obvious patterns'
-            echo 'Model: sonnet'
-            echo ''
-            echo '### robustness-reviewer'
-            echo 'Find bugs, edge cases, error handling gaps.'
-            echo 'Focus: null checks, callback guards, memory leaks, resource cleanup, threading issues'
-            echo 'Model: opus (deepest reasoning for correctness)'
-            echo ''
-            echo '### consistency-reviewer'
-            echo 'Check adherence to project patterns and conventions.'
-            echo 'Focus: callback guards (safeInvoke/CallbackGuard), topic-based binary detection, type safety (Uint8Array not ArrayBuffer)'
-            echo 'Model: sonnet'
-            echo ''
-            echo '### completeness-reviewer'
-            echo 'Verify testing, documentation, and CHANGELOG completeness.'
-            echo 'Focus: missing tests for new logic, undocumented API changes, CHANGELOG not updated'
-            echo 'Model: haiku (fast, checklist-style)'
-            echo ''
-            echo '## Git Setup'
-            echo 'The PR branch is checked out. Fetch main before running diff:'
-            echo '```bash'
-            echo 'git fetch origin main:main'
-            echo '```'
-            echo ''
-            echo '## Review Workflow'
-            echo ''
-            echo '1. Fetch main branch'
-            echo '2. Get PR diff: `gh pr diff ${pr_number}`'
-            echo '3. Spawn all 5 agents in parallel using Agent tool with appropriate model'
-            echo '4. Collect findings from each agent'
-            echo '5. Deduplicate and merge findings'
-            echo '6. Rate each finding 0-100 (confidence × impact)'
-            echo '7. Filter to keep only findings >75'
-            echo '8. Compile unified report grouped by severity:'
-            echo '   - Critical (91-100)'
-            echo '   - Important (76-90)'
-            echo '   - Consider (51-75) - optional tier for context'
-            echo '9. Post as SINGLE PR comment using `gh pr comment`'
-            echo ''
-            echo '## Bedrock Model Mapping'
-            echo 'When spawning agents via Agent tool, use:'
-            echo '- haiku → model: "haiku"'
-            echo '- sonnet → model: "sonnet"'
-            echo '- opus → model: "opus"'
-            echo ''
-            echo 'If opus fails with model access error, retry with sonnet and note downgrade in report.'
-            echo ''
-            echo '## Library-Specific Patterns to Check'
-            echo ''
-            echo '### Critical: Callback Guards (robustness + consistency reviewers)'
-            echo '- Android: safeInvoke(callback, AtomicBoolean, args)'
-            echo '- iOS: CallbackGuard wrapper with NSLock'
-            echo '- iOS Connect: Shared settled guard for mutual exclusion'
-            echo 'Flag any callback without guards.'
-            echo ''
-            echo '### Critical: Binary Detection (robustness + consistency reviewers)'
-            echo '- Topic patterns FIRST (deterministic):'
-            echo '  - Binary: /proto/*, /device*, /firmware*, /ota*, /rma*, /assembly*, /installed*'
-            echo '  - Text: /status*, /config*, /json*, /command*'
-            echo '- UTF-8 fallback ONLY for unknown topics'
-            echo 'Flag hardcoded UTF-8 checks without topic checks first.'
-            echo ''
-            echo '### Type Safety (consistency reviewer)'
-            echo '- Must use Uint8Array, not ArrayBuffer'
-            echo '- Binary messages as Uint8Array, text as string'
-            echo 'Flag ArrayBuffer usage in new code.'
-            echo ''
-            echo '## Output Format'
-            echo ''
-            echo 'Post as SINGLE comment (no inline comments, no GitHub review):'
-            echo ''
-            echo "gh pr comment ${pr_number} --body \"\$(cat <<'REVIEW_REPORT'"
-            echo '_🤖 Deep code review. Five specialized agents analyzed this PR._'
-            echo ''
-            echo '## Overview'
-            echo '[One-line summary of changes]'
-            echo ''
-            echo '## Critical Issues (91-100)'
-            echo '[List critical findings with reasoning and specific line numbers]'
-            echo ''
-            echo '## Important Issues (76-90)'
-            echo '[List important findings]'
-            echo ''
-            echo '## Overall Assessment'
-            echo '[Summary: safe to merge, needs attention, or blocked by critical issues]'
-            echo 'REVIEW_REPORT'
-            echo ')"'
-            echo ''
-            echo 'If report >60000 chars, truncate "Consider" tier with:'
-            echo '"_N additional findings omitted. Run locally for full report._"'
-            echo ''
-            echo '## Context Files to Read'
-            echo '- README.md - Library overview'
-            echo '- docs/ARCHITECTURE.md - Architecture and patterns'
-            echo '- CHANGELOG.md - Recent changes'
-            echo 'DEEP_REVIEW_PROMPT_EOF'
+            echo "prompt<<${delimiter}"
+            # Substitute {{PR_NUMBER}} placeholder with actual PR number
+            sed "s/{{PR_NUMBER}}/${pr_number}/g" "$PROMPT_FILE"
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
           role-to-assume: arn:aws:iam::017820692424:role/GitHubClaudeBedrockRoleGeneracClean
           aws-region: us-east-1
           role-session-name: GitHubClaudeSession
 
       - name: Run Deep Code Review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@20788873eee4d19ee082cf3ddbda2d6e0ac7462b # v1
         with:
           use_bedrock: true
           track_progress: true
@@ -185,4 +76,4 @@ jobs:
           claude_args: |
             --model us.anthropic.claude-sonnet-4-6
             --max-turns 80
-            --allowedTools "Agent,Read,Glob,Grep,Bash(git rev-parse:*),Bash(git log:*),Bash(git diff:*),Bash(git fetch:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),mcp__github__create_inline_comment,mcp__github__create_comment"
+            --allowedTools "Agent,Read,Glob,Grep,Bash(git rev-parse:*),Bash(git log:*),Bash(git diff:*),Bash(git fetch:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),mcp__github_inline_comment__create_inline_comment,mcp__github__create_comment"

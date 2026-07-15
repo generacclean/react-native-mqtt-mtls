@@ -1,6 +1,6 @@
 name: AI Code Review
 
-# Automated AI code review for react-native-mqtt-mtls PRs.
+# Automated AI code review for react-native-ecc-csr PRs.
 #
 # Runs automatically on PRs whose author is on the allowlist
 # (.github/ai-review/reviewers.txt). The review instructions live in
@@ -29,7 +29,7 @@ jobs:
     outputs:
       should_review: ${{ steps.check.outputs.should_review }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Check PR author against allowlist
         id: check
@@ -62,7 +62,7 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Load review prompt
         id: prompt
@@ -73,21 +73,22 @@ jobs:
             echo "::error::Prompt file $PROMPT_FILE not found."
             exit 1
           fi
+          delimiter="PROMPT_EOF_${RANDOM}"
           {
-            echo 'prompt<<PROMPT_EOF'
+            echo "prompt<<${delimiter}"
             cat "$PROMPT_FILE"
-            echo 'PROMPT_EOF'
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
           role-to-assume: arn:aws:iam::017820692424:role/GitHubClaudeBedrockRoleGeneracClean
           aws-region: us-east-1
           role-session-name: GitHubClaudeSession
 
       - name: Run AI code review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@20788873eee4d19ee082cf3ddbda2d6e0ac7462b # v1
         with:
           use_bedrock: true
           track_progress: true
@@ -95,4 +96,4 @@ jobs:
           claude_args: |
             --model us.anthropic.claude-sonnet-4-6
             --max-turns 80
-            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),mcp__github__create_inline_comment,mcp__github__create_comment"
+            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),mcp__github_inline_comment__create_inline_comment,mcp__github__create_comment"

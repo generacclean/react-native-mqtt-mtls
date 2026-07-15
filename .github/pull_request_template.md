@@ -10,7 +10,16 @@
 
 > _Steps to test out your changes for reviewer/QA to check_
 
+### Did you add tests to verify your change?
 
-### Screenshots/gifs(if applicable)
+- [ ] Added
+- [ ] Not Applicable
+
+### Did you add Accessibility props to UI components?
+
+- [ ] Added
+- [ ] Not Applicable
+
+### Screenshots/gifs(if the changes related to UI)
 
 > _Insert the screenshots/gifs_
