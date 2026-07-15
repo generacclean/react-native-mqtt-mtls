@@ -635,6 +635,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
             .build();
 
         File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+
+        // Check if keystore file exists
+        if (!keystoreFile.exists()) {
+            throw new KeyException("Software keystore not found: " + SOFTWARE_KEYSTORE_FILE +
+                ". Ensure CSR module has run and created the encrypted keystore.");
+        }
+
         EncryptedFile encryptedFile = new EncryptedFile.Builder(
             getReactApplicationContext(),
             keystoreFile,
@@ -645,6 +652,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
         KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
         try (FileInputStream fis = encryptedFile.openFileInput()) {
             softwareKeyStore.load(fis, "".toCharArray());
+        } catch (SecurityException e) {
+            // EncryptedFile.openFileInput() throws SecurityException if file was written
+            // as plain PKCS12 by older CSR module version
+            throw new KeyException("Failed to decrypt keystore - file may not be encrypted. " +
+                "Ensure CSR module is using EncryptedFile: " + e.getMessage());
         }
 
         if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
@@ -819,12 +831,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
         Log.d(TAG, "DISCONNECT REQUESTED");
         Log.d(TAG, "───────────────────────────────────────");
 
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
+
         try {
             if (client == null) {
                 Log.d(TAG, "No active MQTT client to disconnect");
-                if (successCallback != null) {
-                    successCallback.invoke("No active connection");
-                }
+                safeInvoke(successCallback, callbackFired, "No active connection");
                 return;
             }
 
@@ -837,14 +849,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             client.close();
                             client = null;
                             Log.i(TAG, "✓ MQTT disconnected and cleaned up");
-                            if (successCallback != null) {
-                                successCallback.invoke("Disconnected successfully");
-                            }
+                            safeInvoke(successCallback, callbackFired, "Disconnected successfully");
                         } catch (Exception e) {
                             Log.e(TAG, "Error closing client", e);
-                            if (errorCallback != null) {
-                                errorCallback.invoke("Disconnect error: " + e.getMessage());
-                            }
+                            safeInvoke(errorCallback, callbackFired, "Disconnect error: " + e.getMessage());
                         }
                     }
 
@@ -862,9 +870,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             Log.e(TAG, "Error force-closing client", e);
                         }
 
-                        if (errorCallback != null) {
-                            errorCallback.invoke("Disconnect failed: " + errorMsg);
-                        }
+                        safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + errorMsg);
                     }
                 });
             } else {
@@ -875,9 +881,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     Log.e(TAG, "Error closing disconnected client", e);
                 }
                 client = null;
-                if (successCallback != null) {
-                    successCallback.invoke("Disconnected successfully");
-                }
+                safeInvoke(successCallback, callbackFired, "Disconnected successfully");
             }
 
         } catch (Exception e) {
@@ -892,9 +896,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 Log.e(TAG, "Cleanup error", cleanupException);
             }
 
-            if (errorCallback != null) {
-                errorCallback.invoke("Disconnect failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + e.getMessage());
         }
     }
 

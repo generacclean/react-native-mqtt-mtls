@@ -407,14 +407,16 @@ class MqttModule: RCTEventEmitter {
         client.autoReconnect = false
         
         os_log("Calling disconnect()...", log: logger, type: .info)
+        let successGuard = CallbackGuard(successCallback)
+
         client.disconnect()
-        
+
         cleanupConnection()
-        
+
         os_log("✓ Disconnected and cleaned up", log: logger, type: .info)
         os_log("", log: logger, type: .info)
-        
-        successCallback(["Disconnected successfully"])
+
+        successGuard.invoke(["Disconnected successfully"])
     }
     
     @objc
@@ -917,17 +919,23 @@ extension MqttModule: CocoaMQTTDelegate {
             os_log("✓✓✓ MQTT CONNECTION SUCCESSFUL ✓✓✓", log: logger, type: .info)
             os_log("", log: logger, type: .info)
             self.sendEvent(withName: "MqttConnected", body: "Connected")
-            connectSuccessCallback?(["Connected to \(brokerUrl)"])
+
+            // Nil out callbacks before invoking to ensure atomicity
+            let successCallback = connectSuccessCallback
             connectSuccessCallback = nil
             connectErrorCallback = nil
+            successCallback?(["Connected to \(brokerUrl)"])
         } else {
             let error = "Connection rejected: \(ack)"
             os_log("✗✗✗ MQTT CONNECTION REJECTED ✗✗✗", log: logger, type: .error)
             os_log("Reason: %{public}@", log: logger, type: .error, error)
             os_log("", log: logger, type: .error)
-            connectErrorCallback?([error])
+
+            // Nil out callbacks before invoking to ensure atomicity
+            let errorCallback = connectErrorCallback
             connectSuccessCallback = nil
             connectErrorCallback = nil
+            errorCallback?([error])
         }
     }
     

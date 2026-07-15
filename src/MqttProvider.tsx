@@ -75,7 +75,7 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
         try {
           const parsedData = typeof data === "string" ? JSON.parse(data) : data;
 
-          // Decode Base64 binary messages and convert to hex string for Field Pro compatibility
+          // Decode Base64 binary messages to Uint8Array
           if (parsedData.isBinary && parsedData.message) {
             try {
               const binaryString = atob(parsedData.message);
@@ -84,19 +84,14 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
                 bytes[i] = binaryString.charCodeAt(i);
               }
 
-              // Convert bytes to hex string for Field Pro handlers (Buffer.from(message, 'hex'))
-              const hexString = Array.from(bytes)
-                .map((byte) => byte.toString(16).padStart(2, "0"))
-                .join("");
-
-              // Replace message content with hex string so handlers receive it directly
-              parsedData.message = hexString;
+              // Return Uint8Array directly - matches MqttManager behavior
+              parsedData.message = bytes;
               console.log(
                 "📨 Message received:",
                 parsedData.topic,
                 "(",
                 bytes.length,
-                "bytes, hex encoded)",
+                "bytes)",
               );
             } catch (decodeErr) {
               console.error("Failed to decode Base64 message:", decodeErr);
@@ -251,13 +246,13 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
             bytes = message; // Already Uint8Array
           }
 
-          // Convert to Base64
+          // Convert to Base64 and prefix with marker
           let binary = "";
           const len = bytes.byteLength;
           for (let i = 0; i < len; i++) {
             binary += String.fromCharCode(bytes[i]);
           }
-          publishMessage = btoa(binary);
+          publishMessage = "B64:" + btoa(binary);
 
           console.log("Publish: Converted binary protobuf to Base64");
           console.log("  - Topic:", topic);
