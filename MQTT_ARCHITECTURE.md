@@ -123,9 +123,9 @@ sequenceDiagram
     participant App as Installer App
     
     Broker->>Native: Binary Message (raw bytes)
-    Note over Native: UTF-8 validity check
+    Note over Native: Topic-based detection<br/>(with UTF-8 fallback)
     
-    alt Binary Message (Invalid UTF-8)
+    alt Binary Message (Known topic or Invalid UTF-8)
         Native->>Native: Base64 encode
         Native->>Bridge: {message: base64, isBinary: true}
         Bridge->>Manager: Receive event data
@@ -143,7 +143,9 @@ sequenceDiagram
 
 **Key Steps**:
 1. **Native Layer**: Receives raw bytes from broker
-2. **Binary Detection**: Checks if payload is valid UTF-8 (protobuf uses varint encoding → invalid UTF-8)
+2. **Binary Detection**: 
+   - **Primary (Deterministic)**: Topic-based pattern matching for known binary topics (e.g., `/proto/`, `/device`, `/rma`, `/firmware`)
+   - **Fallback**: UTF-8 validity check for unknown topics (note: small protobufs can be valid UTF-8, hence topic-based detection is critical)
 3. **Encoding**: Base64 encodes binary data, sends with `isBinary: true` flag
 4. **Transport**: Sends through React Native bridge as event with message + flag
 5. **JavaScript Layer**: Checks `isBinary` flag, decodes Base64 to `Uint8Array` if binary
@@ -151,7 +153,8 @@ sequenceDiagram
 
 **Note**: The receive path uses an `isBinary` flag rather than the `B64:` prefix used in publishing.
 This asymmetry allows the receiver to handle messages from any publisher, regardless of whether
-they use the `B64:` convention.
+they use the `B64:` convention. The topic-based detection ensures reliable binary/text classification
+for production traffic.
 
 ### Message Flow: App → Broker (Publishing Messages)
 
@@ -519,7 +522,7 @@ The React Native bridge **only supports string primitives** for native-to-JS com
 #### Encoding Strategy
 
 **Receive Path** (Broker → App):
-- Native detects binary via UTF-8 validity check
+- Native detects binary via topic-based pattern matching (primary) with UTF-8 validity fallback
 - Sends Base64-encoded message with `isBinary` flag
 - JavaScript layer checks flag to decode correctly
 
@@ -533,7 +536,30 @@ The React Native bridge **only supports string primitives** for native-to-JS com
 ##### 1. Native Layer (Android) - Receive
 ```java
 // MqttModule.java
-private boolean isBinaryData(byte[] payload) {
+private boolean isBinaryData(String topic, byte[] payload) {
+    // DETERMINISTIC: Topic-based detection for known binary message patterns
+    if (topic != null) {
+        // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+        if (topic.contains("/proto/") || topic.contains("/device") ||
+            topic.contains("/rma") || topic.contains("/assembly") ||
+            topic.contains("/installed")) {
+            return true;
+        }
+        
+        // Firmware update topics
+        if (topic.contains("/firmware") || topic.contains("/ota") ||
+            topic.contains("/upload")) {
+            return true;
+        }
+        
+        // Text topics (JSON status, configuration, commands)
+        if (topic.contains("/status") || topic.contains("/config") ||
+            topic.contains("/command") || topic.contains("/json")) {
+            return false;
+        }
+    }
+    
+    // FALLBACK: UTF-8 heuristic for unknown topics
     try {
         CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
         decoder.onMalformedInput(CodingErrorAction.REPORT);
@@ -548,7 +574,7 @@ private boolean isBinaryData(byte[] payload) {
 @Override
 public void messageArrived(String topic, MqttMessage message) {
     byte[] payload = message.getPayload();
-    boolean isBinary = isBinaryData(payload);
+    boolean isBinary = isBinaryData(topic, payload);
     
     WritableMap eventData = Arguments.createMap();
     eventData.putString("topic", topic);
@@ -573,13 +599,35 @@ public void messageArrived(String topic, MqttMessage message) {
 ##### 2. Native Layer (iOS) - Receive
 ```swift
 // MqttModule.swift
-private func isBinaryData(_ data: Data) -> Bool {
+private func isBinaryData(topic: String, data: Data) -> Bool {
+    // DETERMINISTIC: Topic-based detection for known binary message patterns
+    
+    // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+    if topic.contains("/proto/") || topic.contains("/device") ||
+       topic.contains("/rma") || topic.contains("/assembly") ||
+       topic.contains("/installed") {
+        return true
+    }
+    
+    // Firmware update topics
+    if topic.contains("/firmware") || topic.contains("/ota") ||
+       topic.contains("/upload") {
+        return true
+    }
+    
+    // Text topics (JSON status, configuration, commands)
+    if topic.contains("/status") || topic.contains("/config") ||
+       topic.contains("/command") || topic.contains("/json") {
+        return false
+    }
+    
+    // FALLBACK: UTF-8 heuristic for unknown topics
     return String(data: data, encoding: .utf8) == nil
 }
 
 func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
     let payloadData = Data(message.payload)
-    let isBinary = self.isBinaryData(payloadData)
+    let isBinary = self.isBinaryData(topic: message.topic, data: payloadData)
     
     var eventBody: [String: Any] = [
         "topic": message.topic,
@@ -656,8 +704,9 @@ publish(topic: string, message: string | Uint8Array, ...): Promise<void> {
 ```
 
 **Note on Asymmetry**: The publish path adds a `B64:` prefix to signal binary intent on the wire, 
-while the receive path uses an `isBinary` flag based on UTF-8 validity. This design allows the 
-receiver to handle messages from any publisher, regardless of encoding convention.
+while the receive path uses an `isBinary` flag based on topic-based detection (with UTF-8 fallback). 
+This design allows the receiver to handle messages from any publisher, regardless of encoding convention,
+while ensuring reliable binary/text classification for known protobuf and firmware topics.
 
 ### Data Flow Diagram - Receive Path
 
@@ -665,7 +714,7 @@ receiver to handle messages from any publisher, regardless of encoding conventio
 graph LR
     subgraph "Native Layer"
         A[Raw Bytes]
-        B{UTF-8<br/>Valid?}
+        B{Binary Topic<br/>or Invalid UTF-8?}
         C[UTF-8 String]
         D[Base64 Encode]
     end
