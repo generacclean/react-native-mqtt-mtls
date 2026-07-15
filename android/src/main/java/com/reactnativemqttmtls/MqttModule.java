@@ -2,6 +2,8 @@ package com.reactnativemqttmtls;
 
 import android.util.Log;
 import androidx.annotation.NonNull;
+import androidx.security.crypto.EncryptedFile;
+import androidx.security.crypto.MasterKey;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -627,11 +629,21 @@ public class MqttModule extends ReactContextBaseJavaModule {
         // Hardware-backed keys in AndroidKeyStore fail during TLS handshake because
         // Conscrypt requires extractable key material for ECDHE operations, but
         // hardware keys are non-extractable by design.
-        String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-        KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+        // Read encrypted keystore file using EncryptedFile (matches CSR module storage)
+        MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build();
 
-        // Load keystore with try-with-resources to ensure FileInputStream is closed
-        try (FileInputStream fis = new FileInputStream(keystorePath)) {
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+        EncryptedFile encryptedFile = new EncryptedFile.Builder(
+            getReactApplicationContext(),
+            keystoreFile,
+            masterKey,
+            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
+            .build();
+
+        KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+        try (FileInputStream fis = encryptedFile.openFileInput()) {
             softwareKeyStore.load(fis, "".toCharArray());
         }
 
