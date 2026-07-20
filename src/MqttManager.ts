@@ -154,22 +154,23 @@ export class MqttManager {
       // On Android, keystore parameters are passed to control PKCS12 file loading
       // On iOS, keys are loaded from Keychain using only the alias - keystore params are ignored
       if (Platform.OS === 'android') {
-        MqttModule.connect(
+        // Android signature includes keystore params, cast to any since TypeScript interface uses iOS signature
+        (MqttModule.connect as any)(
           config.broker,
           config.clientId,
           config.certificates,
-          config.isAdminUser ?? true ? null : config.sniHostname ?? null,
+          config.isAdminUser ?? false ? null : config.sniHostname ?? null,
           config.brokerIp ?? null,
-          config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
-          config.isAdminUser ?? true,
+          config.isAdminUser ?? false ? null : config.brokerCommonName ?? null,
+          config.isAdminUser ?? false,
           config.keystorePath ?? null,
           config.keystorePassword ?? null,
           config.keystoreFormat ?? null,
-          (success) => {
+          (success: string) => {
             console.log("[MqttManager] Connect success:", success);
             resolve();
           },
-          (error) => {
+          (error: string) => {
             console.error("[MqttManager] Connect error:", error);
             if (config.onError) {
               config.onError(error);
@@ -183,10 +184,10 @@ export class MqttManager {
           config.broker,
           config.clientId,
           config.certificates,
-          config.isAdminUser ?? true ? null : config.sniHostname ?? null,
+          config.isAdminUser ?? false ? null : config.sniHostname ?? null,
           config.brokerIp ?? null,
-          config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
-          config.isAdminUser ?? true,
+          config.isAdminUser ?? false ? null : config.brokerCommonName ?? null,
+          config.isAdminUser ?? false,
           (success) => {
             console.log("[MqttManager] Connect success:", success);
             resolve();

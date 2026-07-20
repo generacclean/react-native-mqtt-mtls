@@ -304,7 +304,7 @@ describe('MqttManager', () => {
         null,
         null,
         null,
-        true,
+        false, // isAdminUser now defaults to false (secure-by-default)
         expect.any(Function),
         expect.any(Function)
       );
