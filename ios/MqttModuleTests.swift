@@ -401,6 +401,7 @@ class MqttModuleTests: XCTestCase {
     // MARK: - UTF-8 Edge Cases
 
     func testUTF8_MultibyteCharacters() {
+        let module = MqttModule()
         // Test various UTF-8 multibyte sequences
         let testCases = [
             "Hello",                    // ASCII
@@ -415,15 +416,16 @@ class MqttModuleTests: XCTestCase {
 
         for text in testCases {
             let data = text.data(using: .utf8)!
-            let isBinary = isBinaryData(data)
+            let isBinary = module.isBinaryData(topic: "test/text", data: data)
             XCTAssertFalse(isBinary, "\(text) should be detected as valid UTF-8")
         }
     }
 
     func testUTF8_ControlCharacters() {
+        let module = MqttModule()
         // Control characters are valid UTF-8
         let controlChars = Data([0x00, 0x01, 0x02, 0x1F])
-        let isBinary = isBinaryData(controlChars)
+        let isBinary = module.isBinaryData(topic: "test/text", data: controlChars)
 
         // Control characters are technically valid UTF-8 but typically considered binary
         // The behavior depends on String(data:encoding:) implementation
