@@ -1,11 +1,13 @@
-import { NativeModules } from 'react-native';
-import type { MqttCertificates } from './types';
+import { NativeModules } from "react-native";
+import type { MqttCertificates } from "./types";
 
 /**
  * Native module interface - parameter order must match iOS/Android native implementations
- * Order: broker, clientId, certificates, sniHostname, brokerIp, brokerCommonName, isAdminUser, successCallback, errorCallback
+ * iOS: broker, clientId, certificates, sniHostname, brokerIp, brokerCommonName, isAdminUser, successCallback, errorCallback
+ * Android: broker, clientId, certificates, sniHostname, brokerIp, brokerCommonName, isAdminUser, keystorePath, keystorePassword, keystoreFormat, successCallback, errorCallback
  */
 interface MqttModuleType {
+  // iOS signature (7 params + 2 callbacks)
   connect(
     broker: string,
     clientId: string,
@@ -15,30 +17,46 @@ interface MqttModuleType {
     brokerCommonName: string | null,
     isAdminUser: boolean,
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
+  ): void;
+
+  // Android signature (10 params + 2 callbacks) - overload
+  connect(
+    broker: string,
+    clientId: string,
+    certificates: MqttCertificates,
+    sniHostname: string | null,
+    brokerIp: string | null,
+    brokerCommonName: string | null,
+    isAdminUser: boolean,
+    keystorePath: string | null,
+    keystorePassword: string | null,
+    keystoreFormat: string | null,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
   ): void;
 
   disconnect(
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
   ): void;
 
   cleanup(
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
   ): void;
 
   subscribe(
     topic: string,
     qos: number,
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
   ): void;
 
   unsubscribe(
     topic: string,
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
   ): void;
 
   publish(
@@ -47,7 +65,7 @@ interface MqttModuleType {
     qos: number,
     retained: boolean,
     successCallback: (message: string) => void,
-    errorCallback: (error: string) => void
+    errorCallback: (error: string) => void,
   ): void;
 
   isConnected(callback: (isConnected: boolean) => void): void;
@@ -60,12 +78,12 @@ const { MqttModule } = NativeModules;
 let mqttModuleInstance: MqttModuleType;
 
 if (!MqttModule) {
-  if (process.env.NODE_ENV === 'test' || typeof jest !== 'undefined') {
+  if (process.env.NODE_ENV === "test" || typeof jest !== "undefined") {
     // Empty object - jest mock will replace this
     mqttModuleInstance = {} as MqttModuleType;
   } else {
     throw new Error(
-      'MqttModule native module not found. Make sure you have properly linked the native module and rebuilt your app.'
+      "MqttModule native module not found. Make sure you have properly linked the native module and rebuilt your app.",
     );
   }
 } else {

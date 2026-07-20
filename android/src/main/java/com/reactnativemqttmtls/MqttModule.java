@@ -522,7 +522,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("clientCert"),
                     certificates.getString("rootCa"),
                     privateKeyAlias,
-                    effectiveBrokerCN);  // null for admin — skips CN validation
+                    effectiveBrokerCN,  // null for admin — skips CN validation
+                    keystorePath,
+                    keystorePassword,
+                    keystoreFormat);
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
@@ -618,7 +621,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String clientPem,
             String rootPem,
             String privateKeyAlias,
-            String expectedBrokerCN) throws Exception {
+            String expectedBrokerCN,
+            String keystorePath,
+            String keystorePassword,
+            String keystoreFormat) throws Exception {
 
         Log.d(TAG, "Creating SSL context with software-backed key");
 

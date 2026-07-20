@@ -1,4 +1,8 @@
-import { NativeEventEmitter, EmitterSubscription, Platform } from "react-native";
+import {
+  NativeEventEmitter,
+  EmitterSubscription,
+  Platform,
+} from "react-native";
 import MqttModule from "./MqttModule";
 import type { MqttConfig, MqttMessage } from "./types";
 
@@ -26,7 +30,7 @@ export class MqttManager {
   private constructor() {
     this.setupEventEmitter();
     // Skip cleanup in test environment (process.env.NODE_ENV === 'test')
-    if (process.env.NODE_ENV !== 'test') {
+    if (process.env.NODE_ENV !== "test") {
       this.performInitialCleanup();
     }
   }
@@ -153,9 +157,9 @@ export class MqttManager {
     return new Promise((resolve, reject) => {
       // On Android, keystore parameters are passed to control PKCS12 file loading
       // On iOS, keys are loaded from Keychain using only the alias - keystore params are ignored
-      if (Platform.OS === 'android') {
-        // Android signature includes keystore params, cast to any since TypeScript interface uses iOS signature
-        (MqttModule.connect as any)(
+      if (Platform.OS === "android") {
+        // Android signature includes keystore params for PKCS12 file control
+        MqttModule.connect(
           config.broker,
           config.clientId,
           config.certificates,
