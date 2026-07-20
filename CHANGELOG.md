@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [1.3.0] - 2026-07-20
 
+### ⚠️ BREAKING CHANGE
+
+- **`isAdminUser` now defaults to `false` (secure-by-default)**
+  - **Previous behavior**: Defaulted to `true`, skipping SNI and CN verification
+  - **New behavior**: Defaults to `false`, enforcing full certificate verification
+  - **Why**: Addresses security review feedback - insecure mode should not be the default
+  - **Migration**: Consumers must either:
+    1. Explicitly pass `isAdminUser: true` to maintain insecure behavior (dev/test only)
+    2. Provide `sniHostname` and `brokerCommonName` for secure production use
+  - **Cross-repo coordination**: installer-app updated to explicitly pass `isAdminUser: true`
+  - **See**: `SECURITY_DEFAULT_CHANGE.md` for detailed migration guide
+
 ### Added
+
+- **Security documentation and test coverage for `isAdminUser` parameter**
+  - Added comprehensive security warnings in `src/types.ts` JSDoc
+  - Added "Security Considerations" section to `README.md` with production/dev examples
+  - Added 20 test cases in `__tests__/isAdminUser-default.test.ts`
+  - Documents the security implications of admin mode vs secure mode
 
 - **Comprehensive test coverage for binary detection**
   - Android: `MqttBinaryDetectionTest.java` uses reflection to test real `isBinaryData(String topic, byte[] payload)` method
@@ -56,7 +74,13 @@ All notable changes to this project will be documented in this file.
 
 ### Migration
 
-**No breaking changes** - backward compatible enhancements:
+**BREAKING CHANGE - `isAdminUser` default**:
+- If your code does NOT pass `isAdminUser` and relies on the default, you must update:
+  - **Option 1**: Add `isAdminUser: true` (for dev/test environments only)
+  - **Option 2**: Add `sniHostname` and `brokerCommonName` (recommended for production)
+- See `SECURITY_DEFAULT_CHANGE.md` for detailed migration steps
+
+**Non-breaking enhancements**:
 - Encrypted keystore is optional (falls back to plain PKCS12)
 - Topic patterns match existing production usage
 - Binary detection behavior unchanged for known topics
