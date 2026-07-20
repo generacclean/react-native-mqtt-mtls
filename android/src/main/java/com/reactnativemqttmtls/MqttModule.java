@@ -105,7 +105,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         // FALLBACK: UTF-8 heuristic for unknown topics
-        // Warning: This can misclassify ASCII-range protobufs as text
+        // Known limitation: ASCII-range protobufs (rare edge case) can pass UTF-8 validation
+        // and be misclassified as text. The topic-based detection above handles known high-risk
+        // patterns (device lists, firmware, etc.). For unknown topics, UTF-8 validity is a
+        // reasonable heuristic that allows new text topics to work without package updates.
+        // If you have binary topics that are misclassified, add them to the patterns above.
+        //
+        // NOTE: This entire detection mechanism will be eliminated in the upcoming JSI/Expo Module
+        // rewrite (IA-5754), which will pass Uint8Array directly without needing content inspection.
         try {
             CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
             decoder.onMalformedInput(CodingErrorAction.REPORT);

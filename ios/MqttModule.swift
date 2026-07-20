@@ -61,7 +61,14 @@ class MqttModule: RCTEventEmitter {
         }
 
         // FALLBACK: UTF-8 heuristic for unknown topics
-        // Warning: This can misclassify ASCII-range protobufs as text
+        // Known limitation: ASCII-range protobufs (rare edge case) can pass UTF-8 validation
+        // and be misclassified as text. The topic-based detection above handles known high-risk
+        // patterns (device lists, firmware, etc.). For unknown topics, UTF-8 validity is a
+        // reasonable heuristic that allows new text topics to work without package updates.
+        // If you have binary topics that are misclassified, add them to the patterns above.
+        //
+        // NOTE: This entire detection mechanism will be eliminated in the upcoming JSI/Expo Module
+        // rewrite (IA-5754), which will pass Uint8Array directly without needing content inspection.
         return String(data: data, encoding: .utf8) == nil
     }
 
@@ -976,18 +983,14 @@ extension MqttModule: CocoaMQTTDelegate {
             eventBody["isBinary"] = true
             os_log("Received binary message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
         } else {
-            // Text data: Send as UTF-8 string
-            if let messageStr = String(data: payloadData, encoding: .utf8) {
-                eventBody["message"] = messageStr
-                eventBody["isBinary"] = false
-                os_log("Received text message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
-            } else {
-                // Fallback if UTF-8 decoding fails (shouldn't happen if isBinaryData works correctly)
-                let payloadBase64 = payloadData.base64EncodedString()
-                eventBody["message"] = payloadBase64
-                eventBody["isBinary"] = true
-                os_log("UTF-8 decode failed, treating as binary: %{public}@", log: logger, type: .error, message.topic)
-            }
+            // Text data: Send as UTF-8 string (with lossy conversion matching Android behavior)
+            // PLATFORM CONSISTENCY: Both iOS and Android now substitute U+FFFD for invalid UTF-8 bytes
+            // rather than falling back to binary encoding, ensuring identical output across platforms.
+            let messageStr = String(data: payloadData, encoding: .utf8) ??
+                            String(decoding: payloadData, as: UTF8.self)  // Lossy: replaces invalid bytes with U+FFFD
+            eventBody["message"] = messageStr
+            eventBody["isBinary"] = false
+            os_log("Received text message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
         }
 
         self.sendEvent(withName: "MqttMessage", body: eventBody)

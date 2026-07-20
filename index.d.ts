@@ -1,6 +1,10 @@
 declare module "@generacclean/react-native-mqtt-mtls" {
   import { ReactNode } from "react";
 
+  // NOTE: Type definitions are maintained in both index.d.ts (for npm consumers)
+  // and src/types.ts (for internal use). Keep them synchronized manually.
+  // Future: Consider generating index.d.ts from src/types.ts via build step (IA-5754).
+
   export interface MqttMessage {
     topic: string;
     message: string | Uint8Array;
@@ -28,12 +32,32 @@ declare module "@generacclean/react-native-mqtt-mtls" {
     broker: string;
     clientId: string;
     /**
-     * Whether to connect as an admin user with full permissions.
-     * Defaults to true. Set to false only if SNI hostname verification is required.
+     * Whether to connect in admin mode, which disables certificate verification.
+     *
+     * SECURITY WARNING:
+     * - When true: Skips SNI hostname verification and broker Common Name pinning
+     * - When false (default): Enforces full certificate verification (production recommended)
+     *
+     * Admin mode should ONLY be used in development/testing environments or when
+     * connecting to brokers with self-signed certificates. Production deployments
+     * should use false (default) with proper sniHostname and brokerCommonName.
+     *
+     * @default false (secure-by-default)
      */
     isAdminUser?: boolean;
+    /**
+     * Expected SNI hostname for certificate verification.
+     * Required when isAdminUser is false. Ignored when isAdminUser is true.
+     */
     sniHostname?: string;
+    /**
+     * Direct IP address of the broker (optional).
+     */
     brokerIp?: string;
+    /**
+     * Expected Common Name in the broker's certificate for pinning.
+     * Required when isAdminUser is false. Ignored when isAdminUser is true.
+     */
     brokerCommonName?: string;
     certificates: MqttCertificates;
     onMessage?: (message: MqttMessage) => void;

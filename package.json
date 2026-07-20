@@ -12,7 +12,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:android": "cd android && ./gradlew test",
-    "test:ios": "echo 'iOS tests require an Xcode project. See RUNNING_TESTS.md for setup instructions.' && exit 1",
+    "test:ios": "echo 'iOS tests require an Xcode project. See docs/RUNNING_TESTS.md for setup instructions.' && exit 1",
     "test:ios:xcode": "cd ios && xcodebuild test -scheme MqttModule -destination 'platform=iOS Simulator,name=iPhone 17 Pro'",
     "lint": "eslint . --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"

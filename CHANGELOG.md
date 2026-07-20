@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
     1. Explicitly pass `isAdminUser: true` to maintain insecure behavior (dev/test only)
     2. Provide `sniHostname` and `brokerCommonName` for secure production use
   - **Cross-repo coordination**: installer-app updated to explicitly pass `isAdminUser: true`
-  - **See**: `SECURITY_DEFAULT_CHANGE.md` for detailed migration guide
+  - **See**: `docs/SECURITY_DEFAULT_CHANGE.md` for detailed migration guide
 
 ### Added
 
@@ -78,7 +78,7 @@ All notable changes to this project will be documented in this file.
 - If your code does NOT pass `isAdminUser` and relies on the default, you must update:
   - **Option 1**: Add `isAdminUser: true` (for dev/test environments only)
   - **Option 2**: Add `sniHostname` and `brokerCommonName` (recommended for production)
-- See `SECURITY_DEFAULT_CHANGE.md` for detailed migration steps
+- See `docs/SECURITY_DEFAULT_CHANGE.md` for detailed migration steps
 
 **Non-breaking enhancements**:
 - Encrypted keystore is optional (falls back to plain PKCS12)

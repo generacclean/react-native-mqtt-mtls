@@ -304,15 +304,15 @@ Example GitHub Actions:
 
 ## Related Documentation
 
-- **Full Testing Guide:** `../TESTING.md`
+- **Full Testing Guide:** `../docs/TESTING.md`
 - **Test Summary:** `../TEST_SUMMARY.md`
 - **Code Review:** `../PR_4_LOCAL_CODE_REVIEW.md`
-- **Architecture:** `../MQTT_ARCHITECTURE.md`
+- **Architecture:** `../docs/MQTT_ARCHITECTURE.md`
 
 ## Support
 
 For test-related issues:
-1. Check `TESTING.md` for detailed troubleshooting
+1. Check `docs/TESTING.md` for detailed troubleshooting
 2. Review test output carefully
 3. Run with `--verbose` flag for more details
 4. Check that mocks are set up correctly
