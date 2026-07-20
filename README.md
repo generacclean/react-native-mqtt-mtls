@@ -342,6 +342,31 @@ MIIDXTCCAkWgAwIBAgIJAKL0UG+mRqS...
 -----END CERTIFICATE-----
 ```
 
+## Known Limitations
+
+### Binary Message Detection for Unknown Topics
+
+The library uses a two-tier detection strategy for incoming messages:
+
+1. **Topic-based detection (deterministic)**: Known binary/text topics (e.g., `/proto/`, `/device`, `/firmware`, `/status`, `/config`) are classified by pattern matching
+2. **UTF-8 heuristic (fallback)**: Unknown topics are classified by attempting UTF-8 decoding
+
+**⚠️ Limitation**: The UTF-8 fallback can **misclassify small protobuf messages** with all-ASCII content as text. This occurs when:
+- The topic is not in the predefined binary/text pattern list
+- The protobuf payload contains only low-value bytes (< 0x80) — e.g., small field numbers, ASCII strings, low numeric values
+- The payload happens to be valid UTF-8
+
+**Impact**: If your application subscribes to topics not covered by the built-in patterns and those topics carry binary protobuf data, you may receive `isBinary: false` and a string instead of a `Uint8Array`. Downstream protobuf decoding will fail silently.
+
+**Workarounds**:
+1. **Add your topic patterns** to the detection logic in `MqttModule.java` (Android) and `MqttModule.swift` (iOS)
+2. **Use explicit binary topics**: Structure your topic hierarchy to include keywords like `/proto/`, `/device`, or `/firmware`
+3. **Type-check in handlers**: Always verify `typeof message === 'string'` before assuming text, and handle unexpected types gracefully
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#binary-detection-strategy) for implementation details.
+
+---
+
 ## Troubleshooting
 
 ### "MqttModule: A client already exists"

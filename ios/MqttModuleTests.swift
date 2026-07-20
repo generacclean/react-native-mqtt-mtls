@@ -50,8 +50,9 @@ class MqttModuleTests: XCTestCase {
 
         XCTAssertFalse(module.isBinaryData(topic: "device/status", data: jsonPayload),
                       "Status topics should be text (JSON)")
-        XCTAssertFalse(module.isBinaryData(topic: "remote/device/status", data: jsonPayload))
-        XCTAssertFalse(module.isBinaryData(topic: "penguin/status/current", data: jsonPayload))
+        // Note: "remote/device/status" is a collision case: /device takes precedence.
+        // See testTopicCollision_DeviceBeforeStatus for that behaviour.
+        XCTAssertFalse(module.isBinaryData(topic: "penguin/status/health", data: jsonPayload))
     }
 
     func testTopicDetection_ConfigTopic_AlwaysText() {
