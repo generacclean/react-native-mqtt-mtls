@@ -53,6 +53,30 @@ export interface MqttConfig {
    */
   brokerCommonName?: string;
   certificates: MqttCertificates;
+  /**
+   * (Android only) Path to the keystore file containing the client private key.
+   * If not provided, defaults to 'software_keys.p12' for backward compatibility.
+   * This makes the keystore location explicit in the API instead of a hidden filesystem convention.
+   *
+   * Note: iOS loads keys from Keychain using the privateKeyAlias - this parameter is ignored.
+   */
+  keystorePath?: string;
+  /**
+   * (Android only) Password for the keystore file.
+   * If not provided, defaults to empty string for backward compatibility.
+   *
+   * Note: iOS loads keys from Keychain - this parameter is ignored.
+   */
+  keystorePassword?: string;
+  /**
+   * (Android only) Format of the keystore file.
+   * - 'pkcs12': Standard PKCS#12 format (default)
+   * - 'encrypted': Android EncryptedFile format (AES256-GCM-HKDF)
+   * If not provided, will attempt encrypted first, then fall back to pkcs12.
+   *
+   * Note: iOS loads keys from Keychain - this parameter is ignored.
+   */
+  keystoreFormat?: 'pkcs12' | 'encrypted';
   onMessage?: (message: MqttMessage) => void;
   onConnect?: () => void;
   onConnectionLost?: (error: string) => void;

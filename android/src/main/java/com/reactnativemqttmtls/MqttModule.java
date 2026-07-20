@@ -454,6 +454,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String brokerIp,
             String brokerCommonName,
             boolean isAdminUser,
+            String keystorePath,
+            String keystorePassword,
+            String keystoreFormat,
             final Callback success,
             final Callback error) {
         final AtomicBoolean callbackFired = new AtomicBoolean(false);
@@ -645,7 +648,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         // Hardware-backed keys in AndroidKeyStore fail during TLS handshake because
         // Conscrypt requires extractable key material for ECDHE operations, but
         // hardware keys are non-extractable by design.
-        KeyStore softwareKeyStore = loadSoftwareKeyStore();
+        KeyStore softwareKeyStore = loadSoftwareKeyStore(keystorePath, keystorePassword, keystoreFormat);
 
         if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
             throw new KeyException("Software key not found: " + privateKeyAlias);
@@ -1012,35 +1015,60 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * 1. Encrypted PKCS12 (new format) - written by react-native-ecc-csr with EncryptedFile
      * 2. Plain PKCS12 (legacy format) - written by older CSR module versions
      *
-     * This dual-format support addresses PR #4 reviewer concern about keystore contract
-     * mismatch between MQTT module and CSR module versions.
+     * This addresses PR #4 reviewer Blocker B by making the keystore contract explicit.
+     * The path, password, and format are now API parameters instead of hidden filesystem conventions.
      *
-     * @return KeyStore loaded from software_keys.p12 file
+     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE)
+     * @param keystorePassword Password for keystore, or null to use empty string
+     * @param keystoreFormat Format hint: "pkcs12", "encrypted", or null for auto-detect
+     * @return KeyStore loaded from the specified keystore file
      * @throws KeyException if keystore file doesn't exist or cannot be loaded
      */
-    private KeyStore loadSoftwareKeyStore() throws Exception {
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+    private KeyStore loadSoftwareKeyStore(String keystorePath, String keystorePassword, String keystoreFormat) throws Exception {
+        // Use defaults for backward compatibility
+        String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
+        String password = (keystorePassword != null) ? keystorePassword : "";
+
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
 
         // Check if keystore file exists
         if (!keystoreFile.exists()) {
             throw new KeyException(
-                "Software keystore not found: " + SOFTWARE_KEYSTORE_FILE +
+                "Software keystore not found: " + filename +
                 ". Ensure CSR module has run and created the keystore file. " +
                 "Expected location: " + keystoreFile.getAbsolutePath()
             );
         }
 
         Log.d(TAG, "Loading software keystore from: " + keystoreFile.getAbsolutePath());
+        Log.d(TAG, "Keystore format hint: " + (keystoreFormat != null ? keystoreFormat : "auto-detect"));
 
-        // Try encrypted format first (new CSR module behavior)
-        KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile);
+        // If format is explicitly specified, try only that format
+        if ("pkcs12".equals(keystoreFormat)) {
+            KeyStore keyStore = tryLoadPlainKeyStore(keystoreFile, password);
+            if (keyStore != null) {
+                Log.d(TAG, "Loaded plain PKCS12 keystore successfully");
+                return keyStore;
+            }
+            throw new KeyException("Failed to load keystore as PKCS12 format");
+        } else if ("encrypted".equals(keystoreFormat)) {
+            KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
+            if (keyStore != null) {
+                Log.d(TAG, "Loaded encrypted keystore successfully");
+                return keyStore;
+            }
+            throw new KeyException("Failed to load keystore as encrypted format");
+        }
+
+        // Auto-detect: Try encrypted format first (new CSR module behavior)
+        KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
         if (keyStore != null) {
             Log.d(TAG, "Loaded encrypted keystore successfully");
             return keyStore;
         }
 
         // Fall back to plain PKCS12 format (legacy CSR module behavior)
-        keyStore = tryLoadPlainKeyStore(keystoreFile);
+        keyStore = tryLoadPlainKeyStore(keystoreFile, password);
         if (keyStore != null) {
             Log.d(TAG, "Loaded plain PKCS12 keystore successfully (legacy format)");
             Log.w(TAG, "Consider updating CSR module to use encrypted keystore format");
@@ -1060,9 +1088,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * Attempts to load keystore as EncryptedFile (AES256-GCM encrypted PKCS12).
      *
      * @param keystoreFile The PKCS12 keystore file
+     * @param password Password for the PKCS12 keystore
      * @return Loaded KeyStore, or null if file is not in encrypted format
      */
-    private KeyStore tryLoadEncryptedKeyStore(File keystoreFile) {
+    private KeyStore tryLoadEncryptedKeyStore(File keystoreFile, String password) {
         try {
             MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -1077,7 +1106,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
             try (FileInputStream fis = encryptedFile.openFileInput()) {
-                keyStore.load(fis, "".toCharArray());
+                keyStore.load(fis, password.toCharArray());
             }
 
             return keyStore;
@@ -1096,13 +1125,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * Attempts to load keystore as plain PKCS12 (unencrypted).
      *
      * @param keystoreFile The PKCS12 keystore file
+     * @param password Password for the PKCS12 keystore
      * @return Loaded KeyStore, or null if file cannot be loaded as plain PKCS12
      */
-    private KeyStore tryLoadPlainKeyStore(File keystoreFile) {
+    private KeyStore tryLoadPlainKeyStore(File keystoreFile, String password) {
         try {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
             try (FileInputStream fis = new FileInputStream(keystoreFile)) {
-                keyStore.load(fis, "".toCharArray());
+                keyStore.load(fis, password.toCharArray());
             }
 
             return keyStore;
