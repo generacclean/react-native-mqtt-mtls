@@ -62,6 +62,15 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * 1. Topic-based (deterministic): Known binary topics are always treated as binary
      * 2. Content-based (fallback): UTF-8 validity check for unknown topics
      *
+     * NOTE: This is intentionally asymmetric with the publish path.
+     * - PUBLISH (JS → Native): Uses B64: prefix marker
+     * - RECEIVE (Native → JS): Uses topic patterns + UTF-8 heuristic
+     *
+     * This allows us to handle messages from ANY publisher, not just our app.
+     * External publishers won't use our B64: convention.
+     *
+     * IMPORTANT: Keep topic patterns in sync with iOS/MqttModule.swift and test files.
+     *
      * @param topic The MQTT topic (used for pattern matching)
      * @param payload The message payload bytes
      * @return true if message should be treated as binary, false for text

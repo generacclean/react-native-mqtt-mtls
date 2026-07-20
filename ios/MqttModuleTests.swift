@@ -1,6 +1,9 @@
 /**
  * Unit tests for MqttModule (iOS)
  * Tests callback guards and binary detection logic
+ *
+ * IMPORTANT: These tests exercise the real isBinaryData(topic:data:) method
+ * from MqttModule using topic-based detection logic.
  */
 
 import XCTest
@@ -8,83 +11,209 @@ import Foundation
 
 class MqttModuleTests: XCTestCase {
 
-    // MARK: - Binary Detection Tests
+    // MARK: - Topic-Based Detection Tests (Deterministic)
+
+    func testTopicDetection_ProtobufTopic_AlwaysBinary() {
+        let module = MqttModule()
+        // ASCII content that would pass UTF-8 check
+        let asciiPayload = "ABC123".data(using: .utf8)!
+
+        XCTAssertTrue(module.isBinaryData(topic: "device/proto/list", data: asciiPayload),
+                     "Protobuf topics should always be binary, regardless of content")
+        XCTAssertTrue(module.isBinaryData(topic: "device/12345/proto/config", data: asciiPayload))
+        XCTAssertTrue(module.isBinaryData(topic: "remote/proto/status", data: asciiPayload))
+    }
+
+    func testTopicDetection_DeviceTopic_AlwaysBinary() {
+        let module = MqttModule()
+        let asciiPayload = "DEVICE-001".data(using: .utf8)!
+
+        XCTAssertTrue(module.isBinaryData(topic: "remote/device/list", data: asciiPayload),
+                     "Device topics should be binary (protobuf device lists)")
+        XCTAssertTrue(module.isBinaryData(topic: "remote/device/12345", data: asciiPayload))
+        XCTAssertTrue(module.isBinaryData(topic: "penguin/device/info", data: asciiPayload))
+    }
+
+    func testTopicDetection_FirmwareTopic_AlwaysBinary() {
+        let module = MqttModule()
+        let asciiPayload = "v1.2.3".data(using: .utf8)!
+
+        XCTAssertTrue(module.isBinaryData(topic: "device/firmware/update", data: asciiPayload),
+                     "Firmware topics should be binary")
+        XCTAssertTrue(module.isBinaryData(topic: "ota/firmware", data: asciiPayload))
+        XCTAssertTrue(module.isBinaryData(topic: "penguin/firmware/version", data: asciiPayload))
+    }
+
+    func testTopicDetection_StatusTopic_AlwaysText() {
+        let module = MqttModule()
+        let jsonPayload = "{\"status\":\"ok\"}".data(using: .utf8)!
+
+        XCTAssertFalse(module.isBinaryData(topic: "device/status", data: jsonPayload),
+                      "Status topics should be text (JSON)")
+        XCTAssertFalse(module.isBinaryData(topic: "remote/device/status", data: jsonPayload))
+        XCTAssertFalse(module.isBinaryData(topic: "penguin/status/current", data: jsonPayload))
+    }
+
+    func testTopicDetection_ConfigTopic_AlwaysText() {
+        let module = MqttModule()
+        let jsonPayload = "{\"key\":\"value\"}".data(using: .utf8)!
+
+        XCTAssertFalse(module.isBinaryData(topic: "device/config", data: jsonPayload),
+                      "Config topics should be text (JSON)")
+        XCTAssertFalse(module.isBinaryData(topic: "remote/config/update", data: jsonPayload))
+    }
+
+    func testTopicDetection_JsonTopic_AlwaysText() {
+        let module = MqttModule()
+        let jsonPayload = "{\"message\":\"test\"}".data(using: .utf8)!
+
+        XCTAssertFalse(module.isBinaryData(topic: "device/json/data", data: jsonPayload),
+                      "JSON topics should be text")
+        XCTAssertFalse(module.isBinaryData(topic: "remote/json/update", data: jsonPayload))
+    }
+
+    // MARK: - Topic Collision Tests (Binary-First Precedence)
+
+    func testTopicCollision_DeviceBeforeStatus() {
+        let module = MqttModule()
+        let payload = "test".data(using: .utf8)!
+
+        // /device is checked before /status, so /device/status returns binary
+        XCTAssertTrue(module.isBinaryData(topic: "remote/device/status", data: payload),
+                     "/device takes precedence over /status (binary-first)")
+    }
+
+    func testTopicCollision_DeviceBeforeConfig() {
+        let module = MqttModule()
+        let payload = "test".data(using: .utf8)!
+
+        // /device is checked before /config, so /device/config returns binary
+        XCTAssertTrue(module.isBinaryData(topic: "remote/device/config", data: payload),
+                     "/device takes precedence over /config (binary-first)")
+    }
+
+    func testTopicCollision_FirmwareBeforeStatus() {
+        let module = MqttModule()
+        let payload = "test".data(using: .utf8)!
+
+        // /firmware is checked before /status
+        XCTAssertTrue(module.isBinaryData(topic: "device/firmware/status", data: payload),
+                     "/firmware takes precedence over /status")
+    }
+
+    // MARK: - ASCII Protobuf Edge Cases
+
+    func testASCIIProtobuf_UnknownTopic_Misclassified() {
+        let module = MqttModule()
+        // Small protobuf with ASCII content - will be misclassified as text
+        // This is a KNOWN LIMITATION documented in the code
+        let asciiProtobuf = "ABC123".data(using: .utf8)!
+
+        let result = module.isBinaryData(topic: "unknown/topic/path", data: asciiProtobuf)
+
+        // This will be FALSE (misclassified as text) because:
+        // 1. Topic doesn't match any pattern
+        // 2. Payload is valid UTF-8 (ASCII)
+        // 3. UTF-8 heuristic fallback says "text"
+        XCTAssertFalse(result,
+                      "KNOWN LIMITATION: ASCII protobuf on unknown topic misclassified as text")
+    }
+
+    func testASCIIProtobuf_KnownBinaryTopic_CorrectlyClassified() {
+        let module = MqttModule()
+        // Same ASCII content, but on a known binary topic
+        let asciiProtobuf = "ABC123".data(using: .utf8)!
+
+        XCTAssertTrue(module.isBinaryData(topic: "device/proto/list", data: asciiProtobuf),
+                     "ASCII protobuf on known binary topic correctly classified")
+    }
+
+    // MARK: - UTF-8 Heuristic Fallback Tests (Unknown Topics)
 
     func testBinaryDetection_ValidUTF8Text() {
+        let module = MqttModule()
         let text = "Hello, MQTT!"
         let data = text.data(using: .utf8)!
 
-        let isBinary = isBinaryData(data)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: data)
 
         XCTAssertFalse(isBinary, "Plain text should not be detected as binary")
     }
 
     func testBinaryDetection_ValidUTF8WithEmoji() {
+        let module = MqttModule()
         let text = "Hello 👋 World 🌍"
         let data = text.data(using: .utf8)!
 
-        let isBinary = isBinaryData(data)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: data)
 
         XCTAssertFalse(isBinary, "UTF-8 text with emoji should not be detected as binary")
     }
 
     func testBinaryDetection_JSONPayload() {
+        let module = MqttModule()
         let json = "{\"timestamp\":1782414353,\"status\":\"active\"}"
         let data = json.data(using: .utf8)!
 
-        let isBinary = isBinaryData(data)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: data)
 
         XCTAssertFalse(isBinary, "JSON should not be detected as binary")
     }
 
     func testBinaryDetection_ProtobufVarint() {
+        let module = MqttModule()
         // Protobuf message with varint encoding: field 7, value 2000
         // tag = (7 << 3 | 0) = 0x38, varint(2000) = [0xD0, 0x0F]
         let protobufData = Data([0x38, 0xD0, 0x0F])
 
-        let isBinary = isBinaryData(protobufData)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: protobufData)
 
         XCTAssertTrue(isBinary, "Protobuf with varint should be detected as binary")
     }
 
     func testBinaryDetection_BinaryData() {
+        let module = MqttModule()
         let binaryData = Data([0x00, 0x01, 0x02, 0xFF, 0x7F, 0x80])
 
-        let isBinary = isBinaryData(binaryData)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: binaryData)
 
         XCTAssertTrue(isBinary, "Binary data should be detected as binary")
     }
 
     func testBinaryDetection_EmptyPayload() {
+        let module = MqttModule()
         let emptyData = Data()
 
-        let isBinary = isBinaryData(emptyData)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: emptyData)
 
         XCTAssertFalse(isBinary, "Empty payload should not be detected as binary")
     }
 
     func testBinaryDetection_NullBytes() {
+        let module = MqttModule()
         let nullBytes = Data([0x00, 0x00, 0x00])
 
-        let isBinary = isBinaryData(nullBytes)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: nullBytes)
 
         XCTAssertTrue(isBinary, "Null bytes should be detected as binary")
     }
 
     func testBinaryDetection_InvalidUTF8Sequence() {
+        let module = MqttModule()
         // Invalid UTF-8: start byte without proper continuation
         let invalidUTF8 = Data([0xC0, 0x20])
 
-        let isBinary = isBinaryData(invalidUTF8)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: invalidUTF8)
 
         XCTAssertTrue(isBinary, "Invalid UTF-8 should be detected as binary")
     }
 
     func testBinaryDetection_MixedASCIIAndBinary() {
+        let module = MqttModule()
         // Starts with valid ASCII, then has invalid UTF-8
         let mixed = Data("Hello".utf8) + Data([0xFF, 0xFE])
 
-        let isBinary = isBinaryData(mixed)
+        let isBinary = module.isBinaryData(topic: "unknown/topic", data: mixed)
 
         XCTAssertTrue(isBinary, "Mixed ASCII and binary should be detected as binary")
     }
@@ -303,11 +432,8 @@ class MqttModuleTests: XCTestCase {
 
     // MARK: - Helper Methods
 
-    private func isBinaryData(_ data: Data) -> Bool {
-        return String(data: data, encoding: .utf8) == nil
-    }
-
     // Mock CallbackGuard for testing
+    // Note: Tests now use the real MqttModule.isBinaryData(topic:data:) method
     private class CallbackGuard {
         private var callback: (([Any]) -> Void)?
         private var hasFired = false

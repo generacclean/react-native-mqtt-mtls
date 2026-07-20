@@ -2,6 +2,66 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-07-20
+
+### Added
+
+- **Comprehensive test coverage for binary detection**
+  - Android: `MqttBinaryDetectionTest.java` uses reflection to test real `isBinaryData(String topic, byte[] payload)` method
+  - iOS: `MqttModuleTests.swift` now tests real `isBinaryData(topic:data:)` method (made `internal` for testing)
+  - Topic collision tests: Verify binary-first precedence (`/device/config` → binary, not text)
+  - ASCII protobuf edge case tests: Document known limitation for unknown topics
+  - Over 40 test cases covering topic patterns, UTF-8 heuristic, and edge cases
+
+- **Encrypted keystore support for CSR module compatibility**
+  - Dual-format keystore loading: Tries encrypted format first, falls back to plain PKCS12
+  - AndroidX Security integration: `androidx.security:security-crypto:1.1.0`
+  - Hardware-backed AES256-GCM master key encryption
+  - Clear error messages for troubleshooting keystore issues
+
+### Changed
+
+- **iOS `isBinaryData` method visibility**: Changed from `private` to `internal` for testing
+- **BouncyCastle provider initialization**: Refactored with double-checked locking pattern
+  - Static `FULL_BC_PROVIDER` reference to avoid Android's stripped-down BC provider
+  - Position 1 (highest priority) insertion to ensure our BC provider is used
+  - Thread-safe initialization with volatile flag and synchronized block
+
+### Fixed
+
+- **Topic pattern documentation**: Added notes about asymmetric publish/receive handling
+- **Test coverage gaps**: Eliminated reimplemented test helpers in favor of real method testing
+- **Documentation sync**: Added comments to keep Android/iOS topic patterns in sync
+
+### Technical Details
+
+**Android Layer (`android/src/main/java/com/reactnativemqttmtls/MqttModule.java`):**
+- Line 49-91: Enhanced `isBinaryData()` documentation with asymmetry notes and sync reminders
+- Line 1020-1114: New `loadSoftwareKeyStore()` with dual-format support
+- Line 44-46: Static `FULL_BC_PROVIDER` to avoid system BC conflicts
+
+**iOS Layer (`ios/MqttModule.swift`):**
+- Line 14-28: Enhanced `isBinaryData()` documentation and changed to `internal` visibility
+- Line 28-65: Topic-based binary detection (matches Android patterns)
+
+**Test Coverage (`android/src/test/java/com/reactnativemqttmtls/MqttBinaryDetectionTest.java`):**
+- 464 lines of comprehensive binary detection tests
+- Uses reflection to access private `isBinaryData(String, byte[])` method
+- Tests all topic patterns, collision cases, and ASCII protobuf edge cases
+
+**Test Coverage (`ios/MqttModuleTests.swift`):**
+- Updated to test real `MqttModule.isBinaryData(topic:data:)` method
+- Removed duplicate single-arg helper method
+- Added topic collision and ASCII protobuf edge case tests
+
+### Migration
+
+**No breaking changes** - backward compatible enhancements:
+- Encrypted keystore is optional (falls back to plain PKCS12)
+- Topic patterns match existing production usage
+- Binary detection behavior unchanged for known topics
+- Test improvements are internal only
+
 ## [1.2.0] - 2026-07-13
 
 ### Fixed

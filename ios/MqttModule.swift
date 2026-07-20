@@ -21,11 +21,18 @@ class MqttModule: RCTEventEmitter {
     /// 1. Topic-based (deterministic): Known binary topics are always treated as binary
     /// 2. Content-based (fallback): UTF-8 validity check for unknown topics
     ///
+    /// NOTE: This is intentionally asymmetric with the publish path.
+    /// - PUBLISH (JS → Native): Uses B64: prefix marker
+    /// - RECEIVE (Native → JS): Uses topic patterns + UTF-8 heuristic
+    ///
+    /// This allows us to handle messages from ANY publisher, not just our app.
+    /// External publishers won't use our B64: convention.
+    ///
     /// - Parameters:
     ///   - topic: The MQTT topic (used for pattern matching)
     ///   - data: The message payload bytes
     /// - Returns: true if message should be treated as binary, false for text
-    private func isBinaryData(topic: String, data: Data) -> Bool {
+    internal func isBinaryData(topic: String, data: Data) -> Bool {
         // DETERMINISTIC: Topic-based detection for known binary message patterns
         // These topics carry protobuf or firmware data and must always be binary
 
