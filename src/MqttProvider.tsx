@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  ReactNode,
+} from "react";
 import { NativeEventEmitter, EmitterSubscription } from "react-native";
 import { MqttContext } from "./MqttContext";
 import MqttModule from "./MqttModule";
@@ -50,24 +56,30 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
 
     // Subscribe to MQTT events
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttConnected", (message: string) => {
-        console.log("MQTT Connected:", message);
-        setIsConnected(true);
-        setError(null);
-        if (configRef.current?.onConnect) {
-          configRef.current.onConnect();
-        }
-      }),
+      eventEmitterRef.current.addListener(
+        "MqttConnected",
+        (message: string) => {
+          console.log("MQTT Connected:", message);
+          setIsConnected(true);
+          setError(null);
+          if (configRef.current?.onConnect) {
+            configRef.current.onConnect();
+          }
+        },
+      ),
     );
 
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttDisconnected", (message: string) => {
-        console.log("MQTT Disconnected:", message);
-        setIsConnected(false);
-        if (configRef.current?.onConnectionLost) {
-          configRef.current.onConnectionLost(message);
-        }
-      }),
+      eventEmitterRef.current.addListener(
+        "MqttDisconnected",
+        (message: string) => {
+          console.log("MQTT Disconnected:", message);
+          setIsConnected(false);
+          if (configRef.current?.onConnectionLost) {
+            configRef.current.onConnectionLost(message);
+          }
+        },
+      ),
     );
 
     subscriptions.push(
@@ -112,9 +124,12 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
     );
 
     subscriptions.push(
-      eventEmitterRef.current.addListener("MqttDeliveryComplete", (message: string) => {
-        console.log("MQTT Delivery Complete:", message);
-      }),
+      eventEmitterRef.current.addListener(
+        "MqttDeliveryComplete",
+        (message: string) => {
+          console.log("MQTT Delivery Complete:", message);
+        },
+      ),
     );
 
     // Cleanup on unmount
@@ -171,14 +186,14 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
     }
   }, []);
 
-  const disconnect = useCallback(async () => {
+  const disconnect = useCallback(async (): Promise<void> => {
     return new Promise((resolve, reject) => {
       MqttModule.disconnect(
         (success) => {
           console.log("Disconnect success:", success);
           setIsConnected(false);
           configRef.current = null;
-          resolve(success);
+          resolve();
         },
         (error) => {
           console.error("Disconnect error:", error);
@@ -188,22 +203,25 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
     });
   }, []);
 
-  const subscribe = useCallback(async (topic: string, qos = 1): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      MqttModule.subscribe(
-        topic,
-        qos,
-        (success: string) => {
-          console.log("Subscribe success:", success);
-          resolve();
-        },
-        (error: string) => {
-          console.error("Subscribe error:", error);
-          reject(error);
-        },
-      );
-    });
-  }, []);
+  const subscribe = useCallback(
+    async (topic: string, qos = 1): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        MqttModule.subscribe(
+          topic,
+          qos,
+          (success: string) => {
+            console.log("Subscribe success:", success);
+            resolve();
+          },
+          (error: string) => {
+            console.error("Subscribe error:", error);
+            reject(error);
+          },
+        );
+      });
+    },
+    [],
+  );
 
   const unsubscribe = useCallback(async (topic: string): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -222,9 +240,15 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
   }, []);
 
   const publish = useCallback(
-    async (topic: string, message: string | Uint8Array | ArrayBuffer, qos = 1, retained = false): Promise<void> => {
+    async (
+      topic: string,
+      message: string | Uint8Array | ArrayBuffer,
+      qos = 1,
+      retained = false,
+    ): Promise<void> => {
       return new Promise((resolve, reject) => {
-        let publishMessage = message;
+        let publishMessage: string | Uint8Array =
+          typeof message === "string" ? message : new Uint8Array();
 
         // Check if Buffer is available in the environment
         const isBuffer =
@@ -264,12 +288,12 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
 
         MqttModule.publish(
           topic,
-          publishMessage,
+          publishMessage as string,
           qos,
           retained,
           (success) => {
             console.log("Publish success:", success);
-            resolve(success);
+            resolve();
           },
           (error) => {
             console.error("Publish error:", error);
