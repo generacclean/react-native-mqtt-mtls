@@ -5,7 +5,11 @@ import React, {
   useRef,
   ReactNode,
 } from "react";
-import { NativeEventEmitter, EmitterSubscription } from "react-native";
+import {
+  NativeEventEmitter,
+  EmitterSubscription,
+  Platform,
+} from "react-native";
 import { MqttContext } from "./MqttContext";
 import MqttModule from "./MqttModule";
 import type { MqttConfig, MqttMessage } from "./types";
@@ -157,27 +161,62 @@ export const MqttProvider = ({ children }: MqttProviderProps) => {
     try {
       configRef.current = config;
       return new Promise((resolve, reject) => {
-        MqttModule.connect(
-          config.broker,
-          config.clientId,
-          config.certificates,
-          config.isAdminUser ?? false ? null : config.sniHostname ?? null,
-          config.brokerIp ?? null,
-          config.isAdminUser ?? false ? null : config.brokerCommonName ?? null,
-          config.isAdminUser ?? false,
-          (success: string) => {
-            console.log("Connect success:", success);
-            resolve();
-          },
-          (error: string) => {
-            console.error("Connect error:", error);
-            setError(error);
-            if (config.onError) {
-              config.onError(error);
-            }
-            reject(error);
-          },
-        );
+        // On Android, keystore parameters are passed to control PKCS12 file loading
+        // On iOS, keys are loaded from Keychain using only the alias - keystore params are ignored
+        if (Platform.OS === "android") {
+          // Android signature includes keystore params for PKCS12 file control
+          MqttModule.connect(
+            config.broker,
+            config.clientId,
+            config.certificates,
+            config.isAdminUser ?? false ? null : config.sniHostname ?? null,
+            config.brokerIp ?? null,
+            config.isAdminUser ?? false
+              ? null
+              : config.brokerCommonName ?? null,
+            config.isAdminUser ?? false,
+            config.keystorePath ?? null,
+            config.keystorePassword ?? null,
+            config.keystoreFormat ?? null,
+            (success: string) => {
+              console.log("Connect success:", success);
+              resolve();
+            },
+            (error: string) => {
+              console.error("Connect error:", error);
+              setError(error);
+              if (config.onError) {
+                config.onError(error);
+              }
+              reject(error);
+            },
+          );
+        } else {
+          // iOS signature - no keystore params
+          MqttModule.connect(
+            config.broker,
+            config.clientId,
+            config.certificates,
+            config.isAdminUser ?? false ? null : config.sniHostname ?? null,
+            config.brokerIp ?? null,
+            config.isAdminUser ?? false
+              ? null
+              : config.brokerCommonName ?? null,
+            config.isAdminUser ?? false,
+            (success: string) => {
+              console.log("Connect success:", success);
+              resolve();
+            },
+            (error: string) => {
+              console.error("Connect error:", error);
+              setError(error);
+              if (config.onError) {
+                config.onError(error);
+              }
+              reject(error);
+            },
+          );
+        }
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
