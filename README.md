@@ -243,6 +243,68 @@ Unsubscribes from a topic.
 
 Publishes a message to a topic. QoS defaults to 1 if not specified.
 
+## Security Considerations
+
+### `isAdminUser` Parameter
+
+The `isAdminUser` configuration option controls certificate verification behavior:
+
+#### **Default: `false` (Secure-by-Default - Recommended for Production)**
+
+When `isAdminUser` is `false` (or omitted), the library enforces **full certificate verification**:
+- ✅ SNI hostname verification (requires `sniHostname` in config)
+- ✅ Broker Common Name pinning (requires `brokerCommonName` in config)
+- ✅ Complete TLS handshake validation
+- ✅ Protection against man-in-the-middle attacks
+
+**Production Example:**
+```tsx
+await connect({
+  broker: 'ssl://mqtt.example.com:8883',
+  clientId: 'production-client',
+  isAdminUser: false,  // Explicit (or omit, same behavior)
+  sniHostname: 'mqtt.example.com',
+  brokerCommonName: 'mqtt.example.com',
+  certificates: { /* ... */ },
+});
+```
+
+#### **Admin Mode: `true` (Disables Certificate Verification)**
+
+⚠️ **SECURITY WARNING**: When `isAdminUser` is `true`, certificate verification is **disabled**:
+- ❌ NO SNI hostname verification
+- ❌ NO Common Name pinning
+- ⚠️  Vulnerable to man-in-the-middle attacks
+
+**Only use admin mode for:**
+- 🔧 Development/testing environments
+- 🔧 Local brokers with self-signed certificates
+- 🔧 Internal networks where security is handled at network layer
+
+**DO NOT use admin mode in production unless you fully understand the security implications.**
+
+**Dev/Test Example:**
+```tsx
+await connect({
+  broker: 'ssl://localhost:8883',
+  clientId: 'dev-client',
+  isAdminUser: true,  // ONLY for dev/test!
+  // sniHostname and brokerCommonName are ignored when isAdminUser is true
+  certificates: { /* ... */ },
+});
+```
+
+### Best Practices
+
+1. **Never hardcode `isAdminUser: true` in production builds**
+2. **Use environment variables** to control security settings:
+   ```tsx
+   isAdminUser: __DEV__ ? true : false,  // Auto-secure in production
+   ```
+3. **Always provide `sniHostname` and `brokerCommonName`** for production connections
+4. **Log warnings** if admin mode is used unintentionally
+5. **Audit your codebase** to ensure admin mode is only used where appropriate
+
 ## Certificate Management
 
 ### Storing Private Key in Android KeyStore
