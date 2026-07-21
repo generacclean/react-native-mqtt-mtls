@@ -243,6 +243,68 @@ Unsubscribes from a topic.
 
 Publishes a message to a topic. QoS defaults to 1 if not specified.
 
+## Security Considerations
+
+### `isAdminUser` Parameter
+
+The `isAdminUser` configuration option controls certificate verification behavior:
+
+#### **Default: `false` (Secure-by-Default - Recommended for Production)**
+
+When `isAdminUser` is `false` (or omitted), the library enforces **full certificate verification**:
+- ✅ SNI hostname verification (requires `sniHostname` in config)
+- ✅ Broker Common Name pinning (requires `brokerCommonName` in config)
+- ✅ Complete TLS handshake validation
+- ✅ Protection against man-in-the-middle attacks
+
+**Production Example:**
+```tsx
+await connect({
+  broker: 'ssl://mqtt.example.com:8883',
+  clientId: 'production-client',
+  isAdminUser: false,  // Explicit (or omit, same behavior)
+  sniHostname: 'mqtt.example.com',
+  brokerCommonName: 'mqtt.example.com',
+  certificates: { /* ... */ },
+});
+```
+
+#### **Admin Mode: `true` (Disables Certificate Verification)**
+
+⚠️ **SECURITY WARNING**: When `isAdminUser` is `true`, certificate verification is **disabled**:
+- ❌ NO SNI hostname verification
+- ❌ NO Common Name pinning
+- ⚠️  Vulnerable to man-in-the-middle attacks
+
+**Only use admin mode for:**
+- 🔧 Development/testing environments
+- 🔧 Local brokers with self-signed certificates
+- 🔧 Internal networks where security is handled at network layer
+
+**DO NOT use admin mode in production unless you fully understand the security implications.**
+
+**Dev/Test Example:**
+```tsx
+await connect({
+  broker: 'ssl://localhost:8883',
+  clientId: 'dev-client',
+  isAdminUser: true,  // ONLY for dev/test!
+  // sniHostname and brokerCommonName are ignored when isAdminUser is true
+  certificates: { /* ... */ },
+});
+```
+
+### Best Practices
+
+1. **Never hardcode `isAdminUser: true` in production builds**
+2. **Use environment variables** to control security settings:
+   ```tsx
+   isAdminUser: __DEV__ ? true : false,  // Auto-secure in production
+   ```
+3. **Always provide `sniHostname` and `brokerCommonName`** for production connections
+4. **Log warnings** if admin mode is used unintentionally
+5. **Audit your codebase** to ensure admin mode is only used where appropriate
+
 ## Certificate Management
 
 ### Storing Private Key in Android KeyStore
@@ -280,6 +342,31 @@ MIIDXTCCAkWgAwIBAgIJAKL0UG+mRqS...
 -----END CERTIFICATE-----
 ```
 
+## Known Limitations
+
+### Binary Message Detection for Unknown Topics
+
+The library uses a two-tier detection strategy for incoming messages:
+
+1. **Topic-based detection (deterministic)**: Known binary/text topics (e.g., `/proto/`, `/device`, `/firmware`, `/status`, `/config`) are classified by pattern matching
+2. **UTF-8 heuristic (fallback)**: Unknown topics are classified by attempting UTF-8 decoding
+
+**⚠️ Limitation**: The UTF-8 fallback can **misclassify small protobuf messages** with all-ASCII content as text. This occurs when:
+- The topic is not in the predefined binary/text pattern list
+- The protobuf payload contains only low-value bytes (< 0x80) — e.g., small field numbers, ASCII strings, low numeric values
+- The payload happens to be valid UTF-8
+
+**Impact**: If your application subscribes to topics not covered by the built-in patterns and those topics carry binary protobuf data, you may receive `isBinary: false` and a string instead of a `Uint8Array`. Downstream protobuf decoding will fail silently.
+
+**Workarounds**:
+1. **Add your topic patterns** to the detection logic in `MqttModule.java` (Android) and `MqttModule.swift` (iOS)
+2. **Use explicit binary topics**: Structure your topic hierarchy to include keywords like `/proto/`, `/device`, or `/firmware`
+3. **Type-check in handlers**: Always verify `typeof message === 'string'` before assuming text, and handle unexpected types gracefully
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#binary-detection-strategy) for implementation details.
+
+---
+
 ## Troubleshooting
 
 ### "MqttModule: A client already exists"
@@ -298,6 +385,11 @@ This error occurs when trying to create multiple MQTT clients. The Context Provi
 1. Ensure certificate chain is complete (client cert → intermediate CA → root CA)
 2. Verify certificates haven't expired
 3. Check that private key matches the client certificate
+
+## Documentation
+
+- **[Architecture Guide](docs/ARCHITECTURE.md)**: Detailed architecture, message flow, and binary handling
+- **[API Reference](docs/API.md)**: Full API documentation (coming soon)
 
 ## Example App
 

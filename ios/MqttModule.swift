@@ -6,6 +6,72 @@ import os.log
 
 @objc(MqttModule)
 class MqttModule: RCTEventEmitter {
+    /// Prefix marker to distinguish intentional Base64-encoded binary messages
+    /// from plain text that happens to be valid Base64 (e.g., JSON strings).
+    /// Must match the prefix in JavaScript layer (MqttManager.ts).
+    private static let BINARY_MARKER = "B64:"
+
+    /// Detects whether a message is binary based on topic pattern and payload inspection.
+    ///
+    /// CRITICAL: UTF-8 heuristic alone is insufficient for protobuf detection because small
+    /// protobufs with ASCII serial numbers and low field tags can be valid UTF-8, causing
+    /// misclassification that leads to parse failures in downstream handlers.
+    ///
+    /// Detection strategy:
+    /// 1. Topic-based (deterministic): Known binary topics are always treated as binary
+    /// 2. Content-based (fallback): UTF-8 validity check for unknown topics
+    ///
+    /// NOTE: This is intentionally asymmetric with the publish path.
+    /// - PUBLISH (JS → Native): Uses B64: prefix marker
+    /// - RECEIVE (Native → JS): Uses topic patterns + UTF-8 heuristic
+    ///
+    /// This allows us to handle messages from ANY publisher, not just our app.
+    /// External publishers won't use our B64: convention.
+    ///
+    /// - Parameters:
+    ///   - topic: The MQTT topic (used for pattern matching)
+    ///   - data: The message payload bytes
+    /// - Returns: true if message should be treated as binary, false for text
+    internal func isBinaryData(topic: String, data: Data) -> Bool {
+        // DETERMINISTIC: Topic-based detection for known binary message patterns
+        // These topics carry protobuf or firmware data and must always be binary
+
+        // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+        if topic.contains("/proto/") ||
+           topic.contains("/device") ||
+           topic.contains("/rma") ||
+           topic.contains("/assembly") ||
+           topic.contains("/installed") {
+            return true
+        }
+
+        // Firmware update topics
+        if topic.contains("/firmware") ||
+           topic.contains("/ota") ||
+           topic.contains("/upload") {
+            return true
+        }
+
+        // Text topics (JSON status, configuration, commands)
+        if topic.contains("/status") ||
+           topic.contains("/config") ||
+           topic.contains("/command") ||
+           topic.contains("/json") {
+            return false
+        }
+
+        // FALLBACK: UTF-8 heuristic for unknown topics
+        // Known limitation: ASCII-range protobufs (rare edge case) can pass UTF-8 validation
+        // and be misclassified as text. The topic-based detection above handles known high-risk
+        // patterns (device lists, firmware, etc.). For unknown topics, UTF-8 validity is a
+        // reasonable heuristic that allows new text topics to work without package updates.
+        // If you have binary topics that are misclassified, add them to the patterns above.
+        //
+        // NOTE: This entire detection mechanism will be eliminated in the upcoming JSI/Expo Module
+        // rewrite (IA-5754), which will pass Uint8Array directly without needing content inspection.
+        return String(data: data, encoding: .utf8) == nil
+    }
+
     private var mqttClient: CocoaMQTT?
     private var expectedBrokerCN: String?
     private var connectSuccessCallback: RCTResponseSenderBlock?
@@ -14,8 +80,36 @@ class MqttModule: RCTEventEmitter {
     private var clientIdentifier: String = ""
     private var connectionStartTime: Date?
     private var isAutoReconnectEnabled: Bool = false
-    
+
     private let logger = OSLog(subsystem: "com.neurio.generachome", category: "MqttModule")
+
+    /// Wrapper class to ensure React Native callbacks are invoked exactly once.
+    /// Prevents crashes from React Native bridge's single-fire invariant violation.
+    private class CallbackGuard {
+        private var callback: RCTResponseSenderBlock?
+        private var hasFired = false
+        private let lock = NSLock()
+
+        init(_ callback: RCTResponseSenderBlock?) {
+            self.callback = callback
+        }
+
+        func invoke(_ args: [Any]) {
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard !hasFired, let callback = callback else {
+                if hasFired {
+                    os_log("Suppressed duplicate callback invocation", type: .default)
+                }
+                return
+            }
+
+            hasFired = true
+            self.callback = nil
+            callback(args)
+        }
+    }
     
     override init() {
         super.init()
@@ -89,6 +183,41 @@ class MqttModule: RCTEventEmitter {
         successCallback: @escaping RCTResponseSenderBlock,
         errorCallback: @escaping RCTResponseSenderBlock
     ) {
+        // Use a shared settled flag to ensure exactly one callback fires (success OR error, not both)
+        // This provides mutual exclusion matching Android's single AtomicBoolean behavior
+        var settled = false
+        let settledLock = NSLock()
+
+        let successGuard = CallbackGuard { args in
+            settledLock.lock()
+            let wasSettled = settled
+            if !wasSettled {
+                settled = true
+            }
+            settledLock.unlock()
+
+            if !wasSettled {
+                successCallback(args)
+            } else {
+                os_log("Suppressed success callback - connect already settled", type: .default)
+            }
+        }
+
+        let errorGuard = CallbackGuard { args in
+            settledLock.lock()
+            let wasSettled = settled
+            if !wasSettled {
+                settled = true
+            }
+            settledLock.unlock()
+
+            if !wasSettled {
+                errorCallback(args)
+            } else {
+                os_log("Suppressed error callback - connect already settled", type: .default)
+            }
+        }
+
         // Ensure clean slate before new connection
         if mqttClient != nil {
             os_log("Found existing client, cleaning up before new connection...", log: logger, type: .info)
@@ -133,7 +262,7 @@ class MqttModule: RCTEventEmitter {
                   let keyAlias = privateKeyAlias else {
                 let error = "Missing required parameters (clientCert, privateKeyAlias, or rootCa)"
                 os_log("ERROR: %{public}@", log: logger, type: .error, error)
-                errorCallback([error])
+                errorGuard.invoke([error])
                 return
             }
             
@@ -234,8 +363,8 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
-            self.connectSuccessCallback = successCallback
-            self.connectErrorCallback = errorCallback
+            self.connectSuccessCallback = { args in successGuard.invoke(args ?? []) }
+            self.connectErrorCallback = { args in errorGuard.invoke(args ?? []) }
             self.brokerUrl = broker
             self.clientIdentifier = clientId
             self.mqttClient = client
@@ -254,7 +383,7 @@ class MqttModule: RCTEventEmitter {
                 os_log("  - Waiting for delegate callbacks...", log: logger, type: .info)
             } else {
                 os_log("✗ Connection initiation FAILED", log: logger, type: .error)
-                errorCallback(["Failed to start connection - client.connect() returned false"])
+                errorGuard.invoke(["Failed to start connection - client.connect() returned false"])
             }
             
             os_log("═══════════════════════════════════════════════════════", log: logger, type: .info)
@@ -269,7 +398,7 @@ class MqttModule: RCTEventEmitter {
             os_log("Error domain: %{public}@", log: logger, type: .error, (error as NSError).domain)
             os_log("Error code: %d", log: logger, type: .error, (error as NSError).code)
             os_log("", log: logger, type: .error)
-            errorCallback([error.localizedDescription])
+            errorGuard.invoke([error.localizedDescription])
         }
     }
     
@@ -292,84 +421,106 @@ class MqttModule: RCTEventEmitter {
         client.autoReconnect = false
         
         os_log("Calling disconnect()...", log: logger, type: .info)
+        let successGuard = CallbackGuard(successCallback)
+
         client.disconnect()
-        
+
         cleanupConnection()
-        
+
         os_log("✓ Disconnected and cleaned up", log: logger, type: .info)
         os_log("", log: logger, type: .info)
-        
-        successCallback(["Disconnected successfully"])
+
+        successGuard.invoke(["Disconnected successfully"])
     }
     
     @objc
     func subscribe(_ topic: String, qos: NSInteger,
                   successCallback: @escaping RCTResponseSenderBlock,
                   errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("SUBSCRIBE: topic=%{public}@, qos=%d", log: logger, type: .info, topic, qos)
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Subscribe failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
-        
+
         let mqttQos = CocoaMQTTQoS(rawValue: UInt8(qos)) ?? .qos1
         client.subscribe(topic, qos: mqttQos)
         os_log("✓ Subscribe request sent", log: logger, type: .info)
-        successCallback(["Subscribed to \(topic)"])
+        successGuard.invoke(["Subscribed to \(topic)"])
     }
     
     @objc
     func unsubscribe(_ topic: String,
                     successCallback: @escaping RCTResponseSenderBlock,
                     errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("UNSUBSCRIBE: topic=%{public}@", log: logger, type: .info, topic)
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Unsubscribe failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
-        
+
         client.unsubscribe(topic)
         os_log("✓ Unsubscribe request sent", log: logger, type: .info)
-        successCallback(["Unsubscribed from \(topic)"])
+        successGuard.invoke(["Unsubscribed from \(topic)"])
     }
     
     @objc
     func publish(_ topic: String, message: String, qos: NSInteger, retained: Bool,
                 successCallback: @escaping RCTResponseSenderBlock,
                 errorCallback: @escaping RCTResponseSenderBlock) {
+        let successGuard = CallbackGuard(successCallback)
+        let errorGuard = CallbackGuard(errorCallback)
+
         os_log("PUBLISH: topic=%{public}@, qos=%d, retained=%{public}@", log: logger, type: .info, topic, qos, String(retained))
-        
+
         guard let client = mqttClient, client.connState == .connected else {
             os_log("✗ Publish failed: Client not connected", log: logger, type: .error)
-            errorCallback(["Client not connected"])
+            errorGuard.invoke(["Client not connected"])
             return
         }
         
         let mqttQos = CocoaMQTTQoS(rawValue: UInt8(qos)) ?? .qos1
-        
-        if let binaryData = Data(base64Encoded: message) {
-            let payload = [UInt8](binaryData)
-            let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
-            client.publish(mqttMessage)
-            os_log("✓ Published binary data (%d bytes)", log: logger, type: .info, payload.count)
+
+        // Check if message is marked as Base64-encoded binary
+        // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
+        if message.hasPrefix(MqttModule.BINARY_MARKER) {
+            // Remove marker and decode Base64
+            let base64String = String(message.dropFirst(MqttModule.BINARY_MARKER.count))
+            if let binaryData = Data(base64Encoded: base64String) {
+                let payload = [UInt8](binaryData)
+                let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
+                client.publish(mqttMessage)
+                os_log("✓ Published marked Base64 binary data (%d bytes)", log: logger, type: .info, payload.count)
+            } else {
+                os_log("✗ Failed to decode Base64 message", log: logger, type: .error)
+                errorGuard.invoke(["Failed to decode Base64 message"])
+                return
+            }
         } else {
+            // Plain text (UTF-8) - common case for JSON strings
             if let stringData = message.data(using: .utf8) {
                 let payload = [UInt8](stringData)
                 let mqttMessage = CocoaMQTTMessage(topic: topic, payload: payload, qos: mqttQos, retained: retained)
                 client.publish(mqttMessage)
-                os_log("✓ Published string data (%d bytes)", log: logger, type: .info, payload.count)
+                os_log("✓ Published UTF-8 text data (%d bytes)", log: logger, type: .info, payload.count)
             } else {
-                os_log("✗ Failed to encode message", log: logger, type: .error)
-                errorCallback(["Failed to encode message as UTF-8"])
+                os_log("✗ Failed to encode message as UTF-8", log: logger, type: .error)
+                errorGuard.invoke(["Failed to encode message as UTF-8"])
                 return
             }
         }
-        
-        successCallback(["Published to \(topic)"])
+
+        successGuard.invoke(["Published to \(topic)"])
     }
     
     @objc
@@ -782,17 +933,23 @@ extension MqttModule: CocoaMQTTDelegate {
             os_log("✓✓✓ MQTT CONNECTION SUCCESSFUL ✓✓✓", log: logger, type: .info)
             os_log("", log: logger, type: .info)
             self.sendEvent(withName: "MqttConnected", body: "Connected")
-            connectSuccessCallback?(["Connected to \(brokerUrl)"])
+
+            // Nil out callbacks before invoking to ensure atomicity
+            let successCallback = connectSuccessCallback
             connectSuccessCallback = nil
             connectErrorCallback = nil
+            successCallback?(["Connected to \(brokerUrl)"])
         } else {
             let error = "Connection rejected: \(ack)"
             os_log("✗✗✗ MQTT CONNECTION REJECTED ✗✗✗", log: logger, type: .error)
             os_log("Reason: %{public}@", log: logger, type: .error, error)
             os_log("", log: logger, type: .error)
-            connectErrorCallback?([error])
+
+            // Nil out callbacks before invoking to ensure atomicity
+            let errorCallback = connectErrorCallback
             connectSuccessCallback = nil
             connectErrorCallback = nil
+            errorCallback?([error])
         }
     }
     
@@ -810,16 +967,33 @@ extension MqttModule: CocoaMQTTDelegate {
     
     func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
         os_log("DELEGATE: didReceiveMessage (id=%d, topic=%{public}@, size=%d bytes)", log: logger, type: .info, id, message.topic, message.payload.count)
-        
+
         let payloadData = Data(message.payload)
-        let payloadBase64 = payloadData.base64EncodedString()
-        
-        self.sendEvent(withName: "MqttMessage", body: [
+        let isBinary = self.isBinaryData(topic: message.topic, data: payloadData)
+
+        var eventBody: [String: Any] = [
             "topic": message.topic,
-            "message": payloadBase64,
-            "isBinary": true,
             "qos": message.qos.rawValue
-        ])
+        ]
+
+        if isBinary {
+            // Binary data: Base64 encode for transport over bridge
+            let payloadBase64 = payloadData.base64EncodedString()
+            eventBody["message"] = payloadBase64
+            eventBody["isBinary"] = true
+            os_log("Received binary message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
+        } else {
+            // Text data: Send as UTF-8 string (with lossy conversion matching Android behavior)
+            // PLATFORM CONSISTENCY: Both iOS and Android now substitute U+FFFD for invalid UTF-8 bytes
+            // rather than falling back to binary encoding, ensuring identical output across platforms.
+            let messageStr = String(data: payloadData, encoding: .utf8) ??
+                            String(decoding: payloadData, as: UTF8.self)  // Lossy: replaces invalid bytes with U+FFFD
+            eventBody["message"] = messageStr
+            eventBody["isBinary"] = false
+            os_log("Received text message on topic %{public}@ (%d bytes)", log: logger, type: .debug, message.topic, payloadData.count)
+        }
+
+        self.sendEvent(withName: "MqttMessage", body: eventBody)
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didSubscribeTopics success: NSDictionary, failed: [String]) {

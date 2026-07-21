@@ -1,6 +1,17 @@
-import { NativeEventEmitter, EmitterSubscription } from "react-native";
+import {
+  NativeEventEmitter,
+  EmitterSubscription,
+  Platform,
+} from "react-native";
 import MqttModule from "./MqttModule";
 import type { MqttConfig, MqttMessage } from "./types";
+
+/**
+ * Prefix marker to distinguish intentional Base64-encoded binary messages
+ * from plain text that happens to be valid Base64 (e.g., JSON strings).
+ * Must match the prefix checked in native Android and iOS modules.
+ */
+const BINARY_MARKER = "B64:";
 
 /**
  * Singleton MQTT Manager for imperative API usage.
@@ -18,7 +29,10 @@ export class MqttManager {
 
   private constructor() {
     this.setupEventEmitter();
-    this.performInitialCleanup();
+    // Skip cleanup in test environment (process.env.NODE_ENV === 'test')
+    if (process.env.NODE_ENV !== "test") {
+      this.performInitialCleanup();
+    }
   }
 
   public static get Instance(): MqttManager {
@@ -55,7 +69,7 @@ export class MqttManager {
   }
 
   private setupEventEmitter(): void {
-    this.eventEmitter = new NativeEventEmitter(MqttModule);
+    this.eventEmitter = new NativeEventEmitter(MqttModule as any);
 
     this.subscriptions.push(
       this.eventEmitter.addListener("MqttConnected", (message) => {
@@ -82,7 +96,9 @@ export class MqttManager {
         try {
           const parsedData = typeof data === "string" ? JSON.parse(data) : data;
 
-          // Decode Base64 binary messages and convert to hex string for Field Pro compatibility
+          // Decode Base64 binary messages and return as Uint8Array
+          // Uint8Array is the correct type for binary data and works directly with
+          // TextDecoder, Buffer.from(), and protobuf parsers without conversion
           if (parsedData.isBinary && parsedData.message) {
             try {
               const binaryString = atob(parsedData.message);
@@ -91,19 +107,15 @@ export class MqttManager {
                 bytes[i] = binaryString.charCodeAt(i);
               }
 
-              // Convert bytes to hex string for Field Pro handlers (Buffer.from(message, 'hex'))
-              const hexString = Array.from(bytes)
-                .map((byte) => byte.toString(16).padStart(2, "0"))
-                .join("");
-
-              // Replace message content with hex string so handlers receive it directly
-              parsedData.message = hexString;
+              // Return Uint8Array directly - no .slice() copy needed since bytes.buffer
+              // is already a dedicated, exactly-sized ArrayBuffer
+              parsedData.message = bytes;
               console.log(
                 "[MqttManager] Message received:",
                 parsedData.topic,
                 "(",
                 bytes.length,
-                "bytes, hex encoded)",
+                "bytes, Uint8Array)",
               );
             } catch (decodeErr) {
               console.error(
@@ -143,26 +155,56 @@ export class MqttManager {
     this.config = config;
 
     return new Promise((resolve, reject) => {
-      MqttModule.connect(
-        config.broker,
-        config.clientId,
-        config.certificates,
-        config.isAdminUser ?? true ? null : config.sniHostname ?? null,
-        config.brokerIp ?? null,
-        config.isAdminUser ?? true ? null : config.brokerCommonName ?? null,
-        config.isAdminUser ?? true,
-        (success) => {
-          console.log("[MqttManager] Connect success:", success);
-          resolve();
-        },
-        (error) => {
-          console.error("[MqttManager] Connect error:", error);
-          if (config.onError) {
-            config.onError(error);
-          }
-          reject(new Error(error));
-        },
-      );
+      // On Android, keystore parameters are passed to control PKCS12 file loading
+      // On iOS, keys are loaded from Keychain using only the alias - keystore params are ignored
+      if (Platform.OS === "android") {
+        // Android signature includes keystore params for PKCS12 file control
+        MqttModule.connect(
+          config.broker,
+          config.clientId,
+          config.certificates,
+          config.isAdminUser ?? false ? null : config.sniHostname ?? null,
+          config.brokerIp ?? null,
+          config.isAdminUser ?? false ? null : config.brokerCommonName ?? null,
+          config.isAdminUser ?? false,
+          config.keystorePath ?? null,
+          config.keystorePassword ?? null,
+          config.keystoreFormat ?? null,
+          (success: string) => {
+            console.log("[MqttManager] Connect success:", success);
+            resolve();
+          },
+          (error: string) => {
+            console.error("[MqttManager] Connect error:", error);
+            if (config.onError) {
+              config.onError(error);
+            }
+            reject(new Error(error));
+          },
+        );
+      } else {
+        // iOS: no keystore parameters needed
+        MqttModule.connect(
+          config.broker,
+          config.clientId,
+          config.certificates,
+          config.isAdminUser ?? false ? null : config.sniHostname ?? null,
+          config.brokerIp ?? null,
+          config.isAdminUser ?? false ? null : config.brokerCommonName ?? null,
+          config.isAdminUser ?? false,
+          (success) => {
+            console.log("[MqttManager] Connect success:", success);
+            resolve();
+          },
+          (error) => {
+            console.error("[MqttManager] Connect error:", error);
+            if (config.onError) {
+              config.onError(error);
+            }
+            reject(new Error(error));
+          },
+        );
+      }
     });
   }
 
@@ -257,15 +299,20 @@ export class MqttManager {
           bytes = message;
         }
 
-        // Convert to Base64
+        // Convert to Base64 and prefix with marker to distinguish from plain text
+        // that happens to be valid Base64 (e.g., JSON strings)
         let binary = "";
         const len = bytes.byteLength;
         for (let i = 0; i < len; i++) {
           binary += String.fromCharCode(bytes[i]);
         }
-        publishMessage = btoa(binary);
+        // Prefix with marker to indicate this is intentional Base64-encoded binary
+        // Note: Publish path uses B64: prefix to signal intent on the wire,
+        // while receive path uses isBinary flag based on UTF-8 validity check.
+        // This asymmetry allows the receiver to handle messages from any publisher.
+        publishMessage = BINARY_MARKER + btoa(binary);
 
-        console.log("[MqttManager] Converted binary to Base64:", {
+        console.log("[MqttManager] Converted binary to Base64 with marker:", {
           topic,
           originalByteLength: len,
           base64Length: publishMessage.length,

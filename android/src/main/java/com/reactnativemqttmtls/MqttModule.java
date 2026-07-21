@@ -2,6 +2,8 @@ package com.reactnativemqttmtls;
 
 import android.util.Log;
 import androidx.annotation.NonNull;
+import androidx.security.crypto.EncryptedFile;
+import androidx.security.crypto.MasterKey;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -15,17 +17,112 @@ import org.eclipse.paho.client.mqttv3.*;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import java.io.*;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.*;
 
 public class MqttModule extends ReactContextBaseJavaModule {
     private static final String TAG = "MqttModule";
     private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
+    /**
+     * Prefix marker to distinguish intentional Base64-encoded binary messages
+     * from plain text that happens to be valid Base64 (e.g., JSON strings).
+     * Must match the prefix in JavaScript layer (MqttManager.ts).
+     */
+    private static final String BINARY_MARKER = "B64:";
+
+    // Keep a direct reference to our full BouncyCastle provider instance
+    // to avoid getting the system's stripped-down BC provider
+    private static final Provider FULL_BC_PROVIDER = new BouncyCastleProvider();
+
+    // Thread-safe provider initialization
+    private static volatile boolean providerInitialized = false;
+    private static final Object providerLock = new Object();
+
     private final ReactApplicationContext reactContext;
     private MqttAndroidClient client;
     private volatile boolean isAutoReconnectEnabled = false;
+
+    /**
+     * Detects whether a message is binary based on topic pattern and payload inspection.
+     *
+     * CRITICAL: UTF-8 heuristic alone is insufficient for protobuf detection because small
+     * protobufs with ASCII serial numbers and low field tags can be valid UTF-8, causing
+     * misclassification that leads to parse failures in downstream handlers.
+     *
+     * Detection strategy:
+     * 1. Topic-based (deterministic): Known binary topics are always treated as binary
+     * 2. Content-based (fallback): UTF-8 validity check for unknown topics
+     *
+     * NOTE: This is intentionally asymmetric with the publish path.
+     * - PUBLISH (JS → Native): Uses B64: prefix marker
+     * - RECEIVE (Native → JS): Uses topic patterns + UTF-8 heuristic
+     *
+     * This allows us to handle messages from ANY publisher, not just our app.
+     * External publishers won't use our B64: convention.
+     *
+     * IMPORTANT: Keep topic patterns in sync with iOS/MqttModule.swift and test files.
+     *
+     * @param topic The MQTT topic (used for pattern matching)
+     * @param payload The message payload bytes
+     * @return true if message should be treated as binary, false for text
+     */
+    private boolean isBinaryData(String topic, byte[] payload) {
+        // DETERMINISTIC: Topic-based detection for known binary message patterns
+        // These topics carry protobuf or firmware data and must always be binary
+        if (topic != null) {
+            // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+            if (topic.contains("/proto/") ||
+                topic.contains("/device") ||
+                topic.contains("/rma") ||
+                topic.contains("/assembly") ||
+                topic.contains("/installed")) {
+                return true;
+            }
+
+            // Firmware update topics
+            if (topic.contains("/firmware") ||
+                topic.contains("/ota") ||
+                topic.contains("/upload")) {
+                return true;
+            }
+
+            // Text topics (JSON status, configuration, commands)
+            if (topic.contains("/status") ||
+                topic.contains("/config") ||
+                topic.contains("/command") ||
+                topic.contains("/json")) {
+                return false;
+            }
+        }
+
+        // FALLBACK: UTF-8 heuristic for unknown topics
+        // Known limitation: ASCII-range protobufs (rare edge case) can pass UTF-8 validation
+        // and be misclassified as text. The topic-based detection above handles known high-risk
+        // patterns (device lists, firmware, etc.). For unknown topics, UTF-8 validity is a
+        // reasonable heuristic that allows new text topics to work without package updates.
+        // If you have binary topics that are misclassified, add them to the patterns above.
+        //
+        // NOTE: This entire detection mechanism will be eliminated in the upcoming JSI/Expo Module
+        // rewrite (IA-5754), which will pass Uint8Array directly without needing content inspection.
+        try {
+            CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder();
+            decoder.onMalformedInput(CodingErrorAction.REPORT);
+            decoder.onUnmappableCharacter(CodingErrorAction.REPORT);
+            decoder.decode(ByteBuffer.wrap(payload));
+            return false;  // Successfully decoded as UTF-8 → text
+        } catch (CharacterCodingException e) {
+            return true;  // Not valid UTF-8 → binary
+        }
+    }
 
     public MqttModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -38,12 +135,60 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     private void setupBouncyCastle() {
-        try {
-            Security.removeProvider("BC");
-            Security.addProvider(new BouncyCastleProvider());
-            Log.d(TAG, "BouncyCastle provider initialized");
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to register BouncyCastle provider", e);
+        // Fast path - if already initialized, return immediately
+        if (providerInitialized) {
+            return;
+        }
+
+        // Slow path - synchronize and initialize
+        synchronized (providerLock) {
+            // Double-check after acquiring lock
+            if (providerInitialized) {
+                return;
+            }
+
+            try {
+                // Remove the system's stripped BC provider if it exists
+                Provider systemBcProvider = Security.getProvider("BC");
+                if (systemBcProvider != null && systemBcProvider.getClass().getName().startsWith("com.android.org.bouncycastle")) {
+                    Log.d(TAG, "Found Android system BC provider (stripped): " + systemBcProvider.getClass().getName());
+                    Log.d(TAG, "Removing system BC provider to avoid conflicts");
+                    Security.removeProvider("BC");
+                }
+
+                // Register our full BouncyCastle provider at position 1 (highest priority)
+                Security.insertProviderAt(FULL_BC_PROVIDER, 1);
+                Log.d(TAG, "BouncyCastle provider initialized at position 1");
+                Log.d(TAG, "BC Provider version: " + FULL_BC_PROVIDER.getVersion());
+
+                // Mark as initialized
+                providerInitialized = true;
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to register BouncyCastle provider", e);
+            }
+        }
+    }
+
+    /**
+     * Safely invoke a React Native Callback exactly once, even if called multiple times.
+     * Prevents native crash (SIGABRT) from React Native bridge's single-fire invariant violation.
+     *
+     * @param callback The callback to invoke
+     * @param fired AtomicBoolean guard to ensure single invocation
+     * @param args Arguments to pass to the callback
+     */
+    private void safeInvoke(Callback callback, AtomicBoolean fired, Object... args) {
+        if (callback == null) {
+            return;
+        }
+        if (fired.compareAndSet(false, true)) {
+            try {
+                callback.invoke(args);
+            } catch (Exception e) {
+                Log.e(TAG, "Callback invoke error", e);
+            }
+        } else {
+            Log.w(TAG, "Suppressed duplicate callback invocation");
         }
     }
 
@@ -309,8 +454,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String brokerIp,
             String brokerCommonName,
             boolean isAdminUser,
+            String keystorePath,
+            String keystorePassword,
+            String keystoreFormat,
             final Callback success,
             final Callback error) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             // Clean up any existing connection before creating a new one
             if (client != null) {
@@ -325,6 +474,19 @@ public class MqttModule extends ReactContextBaseJavaModule {
             boolean useHardwareKey = certificates.hasKey("useHardwareKey")
                     ? certificates.getBoolean("useHardwareKey")
                     : false;
+
+            // Hardware-backed keys are not supported for mTLS.
+            // Hardware keys in AndroidKeyStore fail during TLS handshake because
+            // Conscrypt requires extractable key material for ECDHE operations, but
+            // hardware keys are non-extractable by design.
+            if (useHardwareKey) {
+                throw new IllegalArgumentException(
+                    "Hardware-backed keys are not supported for mTLS. " +
+                    "Hardware keys fail during TLS handshake because Conscrypt requires " +
+                    "extractable key material for ECDHE operations, but hardware keys are " +
+                    "non-extractable by design. Please use software-backed keys (useHardwareKey: false)."
+                );
+            }
 
             if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
                 throw new IllegalArgumentException("privateKeyAlias required");
@@ -343,7 +505,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.i(TAG, "Admin user: " + isAdminUser);
             Log.i(TAG, "SNI host: " + (effectiveSniHost != null ? effectiveSniHost : "N/A (admin)"));
             Log.i(TAG, "Expected broker CN: " + (effectiveBrokerCN != null ? effectiveBrokerCN : "N/A (admin)"));
-            Log.i(TAG, "Key: " + privateKeyAlias + " (" + (useHardwareKey ? "hardware" : "software") + ")");
+            Log.i(TAG, "Key: " + privateKeyAlias + " (software)");
 
             client = new MqttAndroidClient(
                     getReactApplicationContext(),
@@ -360,8 +522,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("clientCert"),
                     certificates.getString("rootCa"),
                     privateKeyAlias,
-                    useHardwareKey,
-                    effectiveBrokerCN);  // null for admin — skips CN validation
+                    effectiveBrokerCN,  // null for admin — skips CN validation
+                    keystorePath,
+                    keystorePassword,
+                    keystoreFormat);
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
@@ -382,14 +546,27 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
                     try {
-                        String payloadBase64 = android.util.Base64.encodeToString(
-                                message.getPayload(),
-                                android.util.Base64.NO_WRAP);
+                        byte[] payload = message.getPayload();
+                        boolean isBinary = isBinaryData(topic, payload);
 
                         WritableMap eventData = Arguments.createMap();
                         eventData.putString("topic", topic);
-                        eventData.putString("message", payloadBase64);
-                        eventData.putBoolean("isBinary", true);
+
+                        if (isBinary) {
+                            // Binary data: Base64 encode for transport over bridge
+                            String payloadBase64 = android.util.Base64.encodeToString(
+                                    payload,
+                                    android.util.Base64.NO_WRAP);
+                            eventData.putString("message", payloadBase64);
+                            eventData.putBoolean("isBinary", true);
+                            Log.d(TAG, "Received binary message on topic " + topic + " (" + payload.length + " bytes)");
+                        } else {
+                            // Text data: Send as UTF-8 string
+                            String messageStr = new String(payload, StandardCharsets.UTF_8);
+                            eventData.putString("message", messageStr);
+                            eventData.putBoolean("isBinary", false);
+                            Log.d(TAG, "Received text message on topic " + topic + " (" + payload.length + " bytes)");
+                        }
 
                         reactContext
                                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
@@ -409,13 +586,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "MQTT CONNECTION SUCCESSFUL");
-                    if (success != null) {
-                        try {
-                            success.invoke("Connected");
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error invoking success callback", e);
-                        }
-                    }
+                    safeInvoke(success, callbackFired, "Connected");
                 }
 
                 @Override
@@ -432,25 +603,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
                         Log.e(TAG, "MQTT CONNECTION FAILED: Unknown error");
                     }
 
-                    if (error != null) {
-                        try {
-                            error.invoke(errorMessage);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error invoking error callback", e);
-                        }
-                    }
+                    safeInvoke(error, callbackFired, errorMessage);
                 }
             });
         } catch (Exception e) {
             Log.e(TAG, "MQTT setup error", e);
             e.printStackTrace();
-            if (error != null) {
-                try {
-                    error.invoke(e.getMessage() != null ? e.getMessage() : "Setup failed");
-                } catch (Exception callbackException) {
-                    Log.e(TAG, "Error invoking error callback", callbackException);
-                }
-            }
+            safeInvoke(error, callbackFired, e.getMessage() != null ? e.getMessage() : "Setup failed");
         }
     }
 
@@ -462,10 +621,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String clientPem,
             String rootPem,
             String privateKeyAlias,
-            boolean useHardwareKey,
-            String expectedBrokerCN) throws Exception {
+            String expectedBrokerCN,
+            String keystorePath,
+            String keystorePassword,
+            String keystoreFormat) throws Exception {
 
-        Log.d(TAG, "Creating SSL context (" + (useHardwareKey ? "hardware" : "software") + " key)");
+        Log.d(TAG, "Creating SSL context with software-backed key");
 
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
 
@@ -488,55 +649,30 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
         X509Certificate[] certChain = certChainList.toArray(new X509Certificate[0]);
 
-        // Load private key
-        PrivateKey privateKey;
-        PublicKey publicKey;
+        // Load private key from software keystore (PKCS12)
+        // Always use software-backed keys for TLS mTLS compatibility.
+        // Hardware-backed keys in AndroidKeyStore fail during TLS handshake because
+        // Conscrypt requires extractable key material for ECDHE operations, but
+        // hardware keys are non-extractable by design.
+        KeyStore softwareKeyStore = loadSoftwareKeyStore(keystorePath, keystorePassword, keystoreFormat);
 
-        if (useHardwareKey) {
-            KeyStore androidKeyStore = KeyStore.getInstance("AndroidKeyStore");
-            androidKeyStore.load(null);
-
-            if (!androidKeyStore.containsAlias(privateKeyAlias)) {
-                throw new KeyException("Hardware key not found: " + privateKeyAlias);
-            }
-
-            KeyStore.Entry entry = androidKeyStore.getEntry(privateKeyAlias, null);
-            if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
-                throw new KeyException("Not a private key entry");
-            }
-
-            KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-            privateKey = privateKeyEntry.getPrivateKey();
-            publicKey = privateKeyEntry.getCertificate().getPublicKey();
-
-            Log.d(TAG, "Loaded hardware-backed key");
-
-        } else {
-            String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-            FileInputStream fis = new FileInputStream(keystorePath);
-
-            KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
-            softwareKeyStore.load(fis, "".toCharArray());
-            fis.close();
-
-            if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
-                throw new KeyException("Software key not found: " + privateKeyAlias);
-            }
-
-            KeyStore.Entry entry = softwareKeyStore.getEntry(
-                    privateKeyAlias,
-                    new KeyStore.PasswordProtection("".toCharArray()));
-
-            if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
-                throw new KeyException("Not a private key entry");
-            }
-
-            KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-            privateKey = privateKeyEntry.getPrivateKey();
-            publicKey = privateKeyEntry.getCertificate().getPublicKey();
-
-            Log.d(TAG, "Loaded software key");
+        if (!softwareKeyStore.containsAlias(privateKeyAlias)) {
+            throw new KeyException("Software key not found: " + privateKeyAlias);
         }
+
+        KeyStore.Entry entry = softwareKeyStore.getEntry(
+                privateKeyAlias,
+                new KeyStore.PasswordProtection("".toCharArray()));
+
+        if (!(entry instanceof KeyStore.PrivateKeyEntry)) {
+            throw new KeyException("Not a private key entry");
+        }
+
+        KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+        PrivateKey privateKey = privateKeyEntry.getPrivateKey();
+        PublicKey publicKey = privateKeyEntry.getCertificate().getPublicKey();
+
+        Log.d(TAG, "Loaded software-backed key from PKCS12 keystore");
 
         // Verify certificate matches key
         verifyCertMatchesKey(clientCert, publicKey);
@@ -583,6 +719,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void subscribe(String topic, int qos, Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
@@ -592,31 +729,26 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "Subscribed to: " + topic);
-                    if (successCallback != null) {
-                        successCallback.invoke("Subscribed to " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Subscribed to " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Subscribe failed";
                     Log.e(TAG, "Subscribe failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Subscribe failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Subscribe error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Subscribe failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + e.getMessage());
         }
     }
 
     @ReactMethod
     public void unsubscribe(String topic, Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
@@ -626,42 +758,44 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "Unsubscribed from: " + topic);
-                    if (successCallback != null) {
-                        successCallback.invoke("Unsubscribed from " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Unsubscribed from " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Unsubscribe failed";
                     Log.e(TAG, "Unsubscribe failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Unsubscribe failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Unsubscribe error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Unsubscribe failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + e.getMessage());
         }
     }
 
     @ReactMethod
     public void publish(String topic, String message, int qos, boolean retained,
             Callback successCallback, Callback errorCallback) {
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
         try {
             if (client == null || !client.isConnected()) {
                 throw new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED);
             }
 
             byte[] payload;
-            try {
-                payload = android.util.Base64.decode(message, android.util.Base64.NO_WRAP);
-            } catch (IllegalArgumentException e) {
+            // Check if message is marked as Base64-encoded binary
+            // This prevents accidental Base64 decoding of JSON strings that happen to be valid Base64
+            if (message.startsWith(BINARY_MARKER)) {
+                // Remove marker and decode Base64
+                String base64Data = message.substring(BINARY_MARKER.length());
+                payload = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP);
+                Log.d(TAG, "Publish: decoded marked Base64 message (" + payload.length + " bytes) for topic: " + topic);
+            } else {
+                // Plain text (UTF-8) - common case for JSON strings
                 payload = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                Log.d(TAG, "Publish: using UTF-8 text (" + payload.length + " bytes) for topic: " + topic);
             }
 
             MqttMessage mqttMessage = new MqttMessage(payload);
@@ -671,26 +805,20 @@ public class MqttModule extends ReactContextBaseJavaModule {
             client.publish(topic, mqttMessage, null, new IMqttActionListener() {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
-                    if (successCallback != null) {
-                        successCallback.invoke("Published to " + topic);
-                    }
+                    safeInvoke(successCallback, callbackFired, "Published to " + topic);
                 }
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
                     String errorMsg = exception != null ? exception.getMessage() : "Publish failed";
                     Log.e(TAG, "Publish failed: " + errorMsg);
-                    if (errorCallback != null) {
-                        errorCallback.invoke("Publish failed: " + errorMsg);
-                    }
+                    safeInvoke(errorCallback, callbackFired, "Publish failed: " + errorMsg);
                 }
             });
 
         } catch (Exception e) {
             Log.e(TAG, "Publish error", e);
-            if (errorCallback != null) {
-                errorCallback.invoke("Publish failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Publish failed: " + e.getMessage());
         }
     }
 
@@ -700,12 +828,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
         Log.d(TAG, "DISCONNECT REQUESTED");
         Log.d(TAG, "───────────────────────────────────────");
 
+        final AtomicBoolean callbackFired = new AtomicBoolean(false);
+
         try {
             if (client == null) {
                 Log.d(TAG, "No active MQTT client to disconnect");
-                if (successCallback != null) {
-                    successCallback.invoke("No active connection");
-                }
+                safeInvoke(successCallback, callbackFired, "No active connection");
                 return;
             }
 
@@ -718,14 +846,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             client.close();
                             client = null;
                             Log.i(TAG, "✓ MQTT disconnected and cleaned up");
-                            if (successCallback != null) {
-                                successCallback.invoke("Disconnected successfully");
-                            }
+                            safeInvoke(successCallback, callbackFired, "Disconnected successfully");
                         } catch (Exception e) {
                             Log.e(TAG, "Error closing client", e);
-                            if (errorCallback != null) {
-                                errorCallback.invoke("Disconnect error: " + e.getMessage());
-                            }
+                            safeInvoke(errorCallback, callbackFired, "Disconnect error: " + e.getMessage());
                         }
                     }
 
@@ -743,9 +867,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             Log.e(TAG, "Error force-closing client", e);
                         }
 
-                        if (errorCallback != null) {
-                            errorCallback.invoke("Disconnect failed: " + errorMsg);
-                        }
+                        safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + errorMsg);
                     }
                 });
             } else {
@@ -756,9 +878,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     Log.e(TAG, "Error closing disconnected client", e);
                 }
                 client = null;
-                if (successCallback != null) {
-                    successCallback.invoke("Disconnected successfully");
-                }
+                safeInvoke(successCallback, callbackFired, "Disconnected successfully");
             }
 
         } catch (Exception e) {
@@ -773,9 +893,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 Log.e(TAG, "Cleanup error", cleanupException);
             }
 
-            if (errorCallback != null) {
-                errorCallback.invoke("Disconnect failed: " + e.getMessage());
-            }
+            safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + e.getMessage());
         }
     }
 
@@ -893,6 +1011,141 @@ public class MqttModule extends ReactContextBaseJavaModule {
             if (callback != null) {
                 callback.invoke("Error: " + e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Loads software keystore with dual-format support for migration compatibility.
+     *
+     * Supports both:
+     * 1. Encrypted PKCS12 (new format) - written by react-native-ecc-csr with EncryptedFile
+     * 2. Plain PKCS12 (legacy format) - written by older CSR module versions
+     *
+     * This addresses PR #4 reviewer Blocker B by making the keystore contract explicit.
+     * The path, password, and format are now API parameters instead of hidden filesystem conventions.
+     *
+     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE)
+     * @param keystorePassword Password for keystore, or null to use empty string
+     * @param keystoreFormat Format hint: "pkcs12", "encrypted", or null for auto-detect
+     * @return KeyStore loaded from the specified keystore file
+     * @throws KeyException if keystore file doesn't exist or cannot be loaded
+     */
+    private KeyStore loadSoftwareKeyStore(String keystorePath, String keystorePassword, String keystoreFormat) throws Exception {
+        // Use defaults for backward compatibility
+        String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
+        String password = (keystorePassword != null) ? keystorePassword : "";
+
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
+
+        // Check if keystore file exists
+        if (!keystoreFile.exists()) {
+            throw new KeyException(
+                "Software keystore not found: " + filename +
+                ". Ensure CSR module has run and created the keystore file. " +
+                "Expected location: " + keystoreFile.getAbsolutePath()
+            );
+        }
+
+        Log.d(TAG, "Loading software keystore from: " + keystoreFile.getAbsolutePath());
+        Log.d(TAG, "Keystore format hint: " + (keystoreFormat != null ? keystoreFormat : "auto-detect"));
+
+        // If format is explicitly specified, try only that format
+        if ("pkcs12".equals(keystoreFormat)) {
+            KeyStore keyStore = tryLoadPlainKeyStore(keystoreFile, password);
+            if (keyStore != null) {
+                Log.d(TAG, "Loaded plain PKCS12 keystore successfully");
+                return keyStore;
+            }
+            throw new KeyException("Failed to load keystore as PKCS12 format");
+        } else if ("encrypted".equals(keystoreFormat)) {
+            KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
+            if (keyStore != null) {
+                Log.d(TAG, "Loaded encrypted keystore successfully");
+                return keyStore;
+            }
+            throw new KeyException("Failed to load keystore as encrypted format");
+        }
+
+        // Auto-detect: Try encrypted format first (new CSR module behavior)
+        KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
+        if (keyStore != null) {
+            Log.d(TAG, "Loaded encrypted keystore successfully");
+            return keyStore;
+        }
+
+        // Fall back to plain PKCS12 format (legacy CSR module behavior)
+        keyStore = tryLoadPlainKeyStore(keystoreFile, password);
+        if (keyStore != null) {
+            Log.d(TAG, "Loaded plain PKCS12 keystore successfully (legacy format)");
+            Log.w(TAG, "Consider updating CSR module to use encrypted keystore format");
+            return keyStore;
+        }
+
+        // Neither format worked
+        throw new KeyException(
+            "Failed to load software keystore. " +
+            "File exists but could not be read as encrypted or plain PKCS12. " +
+            "The keystore may be corrupted or in an unsupported format. " +
+            "Try regenerating certificates with the CSR module."
+        );
+    }
+
+    /**
+     * Attempts to load keystore as EncryptedFile (AES256-GCM encrypted PKCS12).
+     *
+     * @param keystoreFile The PKCS12 keystore file
+     * @param password Password for the PKCS12 keystore
+     * @return Loaded KeyStore, or null if file is not in encrypted format
+     */
+    private KeyStore tryLoadEncryptedKeyStore(File keystoreFile, String password) {
+        try {
+            MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build();
+
+            EncryptedFile encryptedFile = new EncryptedFile.Builder(
+                getReactApplicationContext(),
+                keystoreFile,
+                masterKey,
+                EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
+                .build();
+
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            try (FileInputStream fis = encryptedFile.openFileInput()) {
+                keyStore.load(fis, password.toCharArray());
+            }
+
+            return keyStore;
+        } catch (SecurityException e) {
+            // SecurityException means file is not encrypted or encryption format mismatch
+            Log.d(TAG, "Keystore is not in encrypted format: " + e.getMessage());
+            return null;
+        } catch (Exception e) {
+            // Other exceptions (IO, key format, etc.) - try next format
+            Log.d(TAG, "Failed to load encrypted keystore: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Attempts to load keystore as plain PKCS12 (unencrypted).
+     *
+     * @param keystoreFile The PKCS12 keystore file
+     * @param password Password for the PKCS12 keystore
+     * @return Loaded KeyStore, or null if file cannot be loaded as plain PKCS12
+     */
+    private KeyStore tryLoadPlainKeyStore(File keystoreFile, String password) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            try (FileInputStream fis = new FileInputStream(keystoreFile)) {
+                keyStore.load(fis, password.toCharArray());
+            }
+
+            return keyStore;
+        } catch (Exception e) {
+            // Not a valid plain PKCS12 file
+            Log.d(TAG, "Failed to load plain PKCS12 keystore: " + e.getMessage());
+            return null;
         }
     }
 
