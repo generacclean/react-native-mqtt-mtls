@@ -1049,9 +1049,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
         // Check if keystore file exists
         if (!keystoreFile.exists()) {
             throw new KeyException(
-                "Software keystore not found: " + filename +
-                ". Ensure CSR module has run and created the keystore file. " +
-                "Expected location: " + keystoreFile.getAbsolutePath()
+                "Software keystore not found: " + keystoreFile.getAbsolutePath() +
+                ". Ensure CSR module has run and created the keystore file."
             );
         }
 
