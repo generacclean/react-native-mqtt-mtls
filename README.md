@@ -2,6 +2,8 @@
 
 A React Native MQTT client with mTLS (mutual TLS) support using a Context Provider pattern for shared connection state across your entire app.
 
+> **ℹ️ This is the Field Pro variant.** Field Pro (installer-app) consumes this `@generacclean`-scoped module from GitHub Packages — make changes here. A separate [`neurio/react-native-mqtt-mtls`](https://github.com/neurio/react-native-mqtt-mtls) exists for **PWRview** (end-of-life, git-SSH) and is not used by Field Pro.
+
 ## Features
 
 - ✅ **mTLS Support**: Full mutual TLS authentication with client certificates
