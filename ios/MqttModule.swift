@@ -74,6 +74,7 @@ class MqttModule: RCTEventEmitter {
 
     private var mqttClient: CocoaMQTT?
     private var expectedBrokerCN: String?
+    private var trustedRootCerts: [SecCertificate] = []
     private var connectSuccessCallback: RCTResponseSenderBlock?
     private var connectErrorCallback: RCTResponseSenderBlock?
     private var brokerUrl: String = ""
@@ -151,6 +152,7 @@ class MqttModule: RCTEventEmitter {
         connectSuccessCallback = nil
         connectErrorCallback = nil
         expectedBrokerCN = nil
+        trustedRootCerts = []
         brokerUrl = ""
         clientIdentifier = ""
         connectionStartTime = nil
@@ -330,6 +332,7 @@ class MqttModule: RCTEventEmitter {
                 }
                 
                 self.expectedBrokerCN = effectiveBrokerCN  // nil for admin — CN validation skipped
+                self.trustedRootCerts = caCerts  // anchors for server chain validation (always required)
                 os_log("  ✓ CA certificates validated", log: logger, type: .info)
                 os_log("", log: logger, type: .info)
                 
@@ -836,7 +839,7 @@ extension MqttModule: CocoaMQTTDelegate {
             let duration = Date().timeIntervalSince(startTime)
             elapsed = String(format: " [+%.3fs]", duration)
         }
-        
+
         os_log("", log: logger, type: .info)
         os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
         os_log("║ DELEGATE: didReceive trust (TLS HANDSHAKE)           ║", log: logger, type: .info)
@@ -844,74 +847,73 @@ extension MqttModule: CocoaMQTTDelegate {
         os_log("║ Time: %{public}@", log: logger, type: .info, elapsed)
         os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
         os_log("", log: logger, type: .info)
-        
-        // STEP 1: Check if CN validation is required
-        os_log("  STEP 1: Checking expected CN...", log: logger, type: .info)
-        guard let expectedCN = self.expectedBrokerCN, !expectedCN.isEmpty else {
-            // Admin user — no CN pinning required, allow the connection
-            os_log("  - No expected CN configured (admin user) — skipping CN validation", log: logger, type: .info)
-            os_log("", log: logger, type: .info)
-            os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
-            os_log("║ TLS VALIDATION: SUCCESS ✓ (admin, CN check skipped) ║", log: logger, type: .info)
-            os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
-            os_log("", log: logger, type: .info)
-            completionHandler(true)
-            return
+
+        let trusted = evaluateServerTrust(trust, expectedCN: expectedBrokerCN, anchors: trustedRootCerts)
+
+        os_log("", log: logger, type: .info)
+        os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: trusted ? .info : .error)
+        os_log("║ TLS VALIDATION: %{public}@", log: logger, type: trusted ? .info : .error, trusted ? "SUCCESS ✓" : "FAILED ✗")
+        os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: trusted ? .info : .error)
+        os_log("", log: logger, type: .info)
+        completionHandler(trusted)
+    }
+
+    /// Validates a server's TLS trust object: chain validation against app-provided anchors is
+    /// always required; CN pinning against `expectedCN` is skipped only when `expectedCN` is nil/empty
+    /// (admin users, who talk to many brokers and have no single CN to pin against).
+    ///
+    /// - Parameters:
+    ///   - trust: The `SecTrust` object presented by the TLS handshake.
+    ///   - expectedCN: The known device CN to pin against, or nil/empty to skip CN pinning.
+    ///   - anchors: The app-provided root CA certificate(s) to validate the chain against.
+    /// - Returns: true if the server should be trusted.
+    internal func evaluateServerTrust(_ trust: SecTrust, expectedCN: String?, anchors: [SecCertificate]) -> Bool {
+        // STEP 1: Validate the server's certificate chain against our app-provided root CA(s).
+        // This runs unconditionally, admin or not — isAdminUser only ever skips the CN pin below.
+        // Policy uses no built-in hostname check (nil host): CN pinning below is our hostname-equivalent
+        // control, and it must remain skippable for admin users who talk to many brokers.
+        guard !anchors.isEmpty else {
+            os_log("  ✗ No trusted root CA certificates configured — rejecting", log: logger, type: .error)
+            return false
         }
-        os_log("  ✓ Expected CN: %{public}@", log: logger, type: .info, expectedCN)
-        
-        // STEP 2: Pull the leaf cert off the trust object
-        os_log("  STEP 2: Retrieving server certificate...", log: logger, type: .info)
+
+        let policy = SecPolicyCreateSSL(true, nil)
+        SecTrustSetPolicies(trust, policy)
+        SecTrustSetAnchorCertificates(trust, anchors as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)  // exclude system roots — only our anchors are trusted
+
+        var trustError: CFError?
+        let chainIsTrusted = SecTrustEvaluateWithError(trust, &trustError)
+
+        if !chainIsTrusted {
+            os_log("  ✗ Certificate chain validation FAILED: %{public}@", log: logger, type: .error,
+                   (trustError as Error?)?.localizedDescription ?? "unknown error")
+            return false
+        }
+        os_log("  ✓ Certificate chain validated against app-provided anchor(s)", log: logger, type: .info)
+
+        // STEP 2: CN pinning — skipped for admin users (no expected CN configured)
+        guard let cn = expectedCN, !cn.isEmpty else {
+            os_log("  - No expected CN configured (admin user) — skipping CN pin", log: logger, type: .info)
+            return true
+        }
+
         guard let serverCert = SecTrustGetCertificateAtIndex(trust, 0) else {
             os_log("  ✗ Cannot retrieve server certificate", log: logger, type: .error)
-            completionHandler(false)
-            return
+            return false
         }
-        os_log("  ✓ Server certificate retrieved", log: logger, type: .info)
-        
-        if let summary = SecCertificateCopySubjectSummary(serverCert) as String? {
-            os_log("    - Server cert subject: %{public}@", log: logger, type: .info, summary)
-        }
-        
-        // STEP 3: Extract the CN from the server cert
-        os_log("  STEP 3: Extracting CN from server certificate...", log: logger, type: .info)
+
         guard let actualCN = extractCommonName(from: serverCert) else {
             os_log("  ✗ Cannot extract CN from server certificate", log: logger, type: .error)
-            completionHandler(false)
-            return
+            return false
         }
-        os_log("  ✓ Actual CN: %{public}@", log: logger, type: .info, actualCN)
-        
-        // STEP 4: Pin — compare extracted CN against the known device identifier
-        os_log("  STEP 4: Comparing CNs...", log: logger, type: .info)
-        os_log("    - Expected: '%{public}@'", log: logger, type: .info, expectedCN)
-        os_log("    - Actual:   '%{public}@'", log: logger, type: .info, actualCN)
-        
-        if actualCN != expectedCN {
-            os_log("  ✗ CN MISMATCH!", log: logger, type: .error)
-            os_log("", log: logger, type: .error)
-            os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .error)
-            os_log("║ TLS VALIDATION: FAILED ✗ (CN mismatch)              ║", log: logger, type: .error)
-            os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .error)
-            os_log("", log: logger, type: .error)
-            completionHandler(false)
-            return
+
+        if actualCN != cn {
+            os_log("  ✗ CN MISMATCH! Expected: %{public}@, Actual: %{public}@", log: logger, type: .error, cn, actualCN)
+            return false
         }
-        os_log("  ✓ CN matches!", log: logger, type: .info)
-        
-        // CN pinning against the known device serial is the trust model here.
-        // SecTrustEvaluateWithError is intentionally not called: Apple enforces a
-        // 398-day max validity on leaf certs, but the broker cert is provisioned by
-        // gateway firmware (Penguin CA) with a longer validity we cannot control.
-        // The CN check against the expected device identifier is sufficient for a
-        // private-network IoT trust boundary.
-        
-        os_log("", log: logger, type: .info)
-        os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
-        os_log("║ TLS VALIDATION: SUCCESS ✓ (CN pinned)               ║", log: logger, type: .info)
-        os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
-        os_log("", log: logger, type: .info)
-        completionHandler(true)
+        os_log("  ✓ CN matches: %{public}@", log: logger, type: .info, actualCN)
+        return true
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {

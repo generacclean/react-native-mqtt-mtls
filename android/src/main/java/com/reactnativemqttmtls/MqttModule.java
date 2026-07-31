@@ -258,9 +258,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private static class CustomTrustManager implements X509TrustManager {
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
+        private final String expectedHost;
 
-        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN) throws Exception {
+        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedHost) throws Exception {
             this.expectedBrokerCN = expectedBrokerCN;
+            this.expectedHost = expectedHost;
 
             List<X509Certificate> certs = new ArrayList<>();
             Enumeration<String> aliases = trustStore.aliases();
@@ -281,6 +283,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
             } else {
                 Log.d(TAG, "Broker CN validation skipped (admin user)");
             }
+
+            if (expectedHost != null && !expectedHost.isEmpty()) {
+                Log.d(TAG, "Expected broker host (SAN pin): " + expectedHost);
+            } else {
+                Log.d(TAG, "Broker hostname/SAN pinning skipped (admin user)");
+            }
         }
 
         @Override
@@ -296,6 +304,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             X509Certificate serverCert = chain[0];
 
+            // Chain validation always runs, admin or not — isAdminUser only ever skips the
+            // CN/hostname pins below (mirrors iOS admin semantics from IA-5805).
+            validateCertificateChain(chain);
+            Log.d(TAG, "✓ Server certificate chain validated via CertPathValidator (PKIX)");
+
             // CN validation only for non-admin users (expectedBrokerCN will be null for admin)
             if (expectedBrokerCN != null && !expectedBrokerCN.isEmpty()) {
                 String brokerCN = extractCN(serverCert);
@@ -309,68 +322,94 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 Log.d(TAG, "✓ Broker CN validated: " + brokerCN);
             }
 
-            boolean validated = false;
-
-            // Try direct validation (server cert signed by one of our CAs)
-            for (X509Certificate ca : acceptedIssuers) {
-                try {
-                    serverCert.verify(ca.getPublicKey());
-                    validated = true;
-                    Log.d(TAG, "Server certificate validated by: " + ca.getSubjectDN());
-                    break;
-                } catch (Exception e) {
-                    // Try next CA
+            // Hostname/SAN validation only for non-admin users (expectedHost will be null for admin)
+            if (expectedHost != null && !expectedHost.isEmpty()) {
+                if (!certificateMatchesHost(serverCert, expectedHost)) {
+                    Log.e(TAG, "SAN MISMATCH! No SAN entry on server certificate matches host: " + expectedHost);
+                    throw new CertificateException(
+                            "Broker certificate SAN does not match dialed host: " + expectedHost);
                 }
+                Log.d(TAG, "✓ Broker certificate SAN matched dialed host: " + expectedHost);
             }
+        }
 
-            // Try validation via intermediate certificates
-            if (!validated && chain.length > 1) {
-                for (int i = 1; i < chain.length; i++) {
-                    X509Certificate intermediate = chain[i];
+        /**
+         * Validates the server's certificate chain against the configured trust anchors using
+         * the platform PKIX path validator (expiry, path-length, basic-constraints, and
+         * signature checks) instead of hand-rolled per-issuer signature loops.
+         */
+        private void validateCertificateChain(X509Certificate[] chain) throws CertificateException {
+            try {
+                Set<TrustAnchor> anchors = new HashSet<>();
+                for (X509Certificate ca : acceptedIssuers) {
+                    anchors.add(new TrustAnchor(ca, null));
+                }
+
+                if (anchors.isEmpty()) {
+                    throw new CertificateException("No trusted CA certificates configured");
+                }
+
+                // PKIX requires the path to end just below a trust anchor, not include it —
+                // drop any presented cert that IS one of our configured anchors.
+                List<X509Certificate> pathCerts = new ArrayList<>();
+                for (X509Certificate cert : chain) {
+                    boolean isAnchor = false;
                     for (X509Certificate ca : acceptedIssuers) {
-                        try {
-                            intermediate.verify(ca.getPublicKey());
-                            serverCert.verify(intermediate.getPublicKey());
-                            validated = true;
-                            Log.d(TAG, "Server certificate validated via intermediate");
+                        if (cert.equals(ca)) {
+                            isAnchor = true;
                             break;
-                        } catch (Exception e) {
-                            // Try next
                         }
                     }
-                    if (validated) break;
-                }
-            }
-
-            // Check if intermediate IS a trusted CA
-            if (!validated && chain.length > 1) {
-                for (int i = 1; i < chain.length; i++) {
-                    X509Certificate intermediate = chain[i];
-                    for (X509Certificate ca : acceptedIssuers) {
-                        if (intermediate.getSubjectDN().equals(ca.getSubjectDN())) {
-                            try {
-                                byte[] intermediatePubKey = intermediate.getPublicKey().getEncoded();
-                                byte[] caPubKey = ca.getPublicKey().getEncoded();
-
-                                if (Arrays.equals(intermediatePubKey, caPubKey)) {
-                                    serverCert.verify(intermediate.getPublicKey());
-                                    validated = true;
-                                    Log.d(TAG, "Server certificate validated by trusted intermediate");
-                                    break;
-                                }
-                            } catch (Exception e) {
-                                // Try next
-                            }
-                        }
+                    if (!isAnchor) {
+                        pathCerts.add(cert);
                     }
-                    if (validated) break;
                 }
-            }
 
-            if (!validated) {
-                Log.e(TAG, "Server certificate validation failed - not trusted by any CA");
-                throw new CertificateException("Server certificate not trusted by any configured CA");
+                if (pathCerts.isEmpty()) {
+                    throw new CertificateException("Server sent no leaf certificate to validate");
+                }
+
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                CertPath certPath = cf.generateCertPath(pathCerts);
+
+                PKIXParameters params = new PKIXParameters(anchors);
+                // No CRL/OCSP infrastructure for the Penguin gateway CA on a private network;
+                // expiry, path-length, and basic-constraints checks still run.
+                params.setRevocationEnabled(false);
+
+                CertPathValidator validator = CertPathValidator.getInstance("PKIX");
+                validator.validate(certPath, params);
+            } catch (CertificateException e) {
+                throw e;
+            } catch (Exception e) {
+                Log.e(TAG, "Certificate chain validation failed", e);
+                throw new CertificateException("Server certificate chain validation failed: " + e.getMessage(), e);
             }
+        }
+
+        /**
+         * Checks whether any DNS or IP subjectAltName entry on the certificate matches the
+         * dialed host exactly (no wildcard matching — this is a private IoT trust boundary).
+         */
+        private boolean certificateMatchesHost(X509Certificate cert, String host) {
+            try {
+                Collection<List<?>> sans = cert.getSubjectAlternativeNames();
+                if (sans == null) {
+                    return false;
+                }
+                for (List<?> san : sans) {
+                    Integer type = (Integer) san.get(0);
+                    Object value = san.get(1);
+                    // GeneralName type 2 = dNSName, type 7 = iPAddress
+                    if ((type == 2 || type == 7) && value instanceof String
+                            && ((String) value).equalsIgnoreCase(host)) {
+                        return true;
+                    }
+                }
+            } catch (CertificateParsingException e) {
+                Log.e(TAG, "Failed to parse SANs from server certificate", e);
+            }
+            return false;
         }
 
         private String extractCN(X509Certificate cert) {
@@ -523,6 +562,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("rootCa"),
                     privateKeyAlias,
                     effectiveBrokerCN,  // null for admin — skips CN validation
+                    effectiveSniHost,   // null for admin — skips hostname/SAN pin (chain validation still runs)
                     keystorePath,
                     keystorePassword,
                     keystoreFormat);
@@ -622,6 +662,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String rootPem,
             String privateKeyAlias,
             String expectedBrokerCN,
+            String expectedHost,
             String keystorePath,
             String keystorePassword,
             String keystoreFormat) throws Exception {
@@ -683,8 +724,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
         };
 
         // Setup TrustManager
-        // expectedBrokerCN is null for admin users — CN validation is skipped,
-        // but certificate chain validation still runs for security
+        // expectedBrokerCN/expectedHost are null for admin users — CN and hostname/SAN pinning
+        // are skipped, but certificate chain validation (via CertPathValidator) always runs
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         trustStore.load(null, null);
         int i = 0;
@@ -693,7 +734,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         TrustManager[] trustManagers = new TrustManager[] {
-                new CustomTrustManager(trustStore, expectedBrokerCN)
+                new CustomTrustManager(trustStore, expectedBrokerCN, expectedHost)
         };
 
         // Create SSL context with TLS 1.3

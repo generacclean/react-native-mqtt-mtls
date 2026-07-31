@@ -8,8 +8,200 @@
 
 import XCTest
 import Foundation
+import Security
 
 class MqttModuleTests: XCTestCase {
+
+    // MARK: - Server Trust Validation Tests (IA-5805)
+    //
+    // Fixtures below are a real EC P-384 chain generated with openssl, mirroring the
+    // spike referenced in IA-5805: Penguin TEST Root -> Intermediate -> broker leaf
+    // (800-day validity, SANs localhost/127.0.0.1/10.0.2.2), plus a self-signed
+    // "forged" cert with the same CN but no relation to the root — the MITM impostor.
+
+    private static let rootPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIByjCCAVCgAwIBAgIUCvp5e+1jhwMlPy80fkNyNpa3l7cwCgYIKoZIzj0EAwMw
+    HDEaMBgGA1UEAwwRUGVuZ3VpbiBURVNUIFJvb3QwHhcNMjYwNzMwMjIzMTQ4WhcN
+    MzYwNzI3MjIzMTQ4WjAcMRowGAYDVQQDDBFQZW5ndWluIFRFU1QgUm9vdDB2MBAG
+    ByqGSM49AgEGBSuBBAAiA2IABHo1LW1mTU5Q/WFbK1/kyw1QtZiDDrDjeATSn8Ez
+    YdyPZpKuqJJ18j1aVv8Inw7ehln/vAfKVjSEDAt4BvKPcP1YJaGa4Ebvhkri8sbf
+    GAoHfbaJ84gApvQiiQDElMt6b6NTMFEwHQYDVR0OBBYEFLKVNcfhYJYhGUVNIu0I
+    mHWuSV+6MB8GA1UdIwQYMBaAFLKVNcfhYJYhGUVNIu0ImHWuSV+6MA8GA1UdEwEB
+    /wQFMAMBAf8wCgYIKoZIzj0EAwMDaAAwZQIxAOU9KBgQ7WI4dOAl8guD3oON5noS
+    TMNVWKq2RAdDnUO+kKxnYmDDvAumwOexnyvSggIwMDRXDd9CsgvteLQuK9oh72Rr
+    5/ocUnKHv+otiypiZmWYaTzZV+cPlsFZNDLqKNHK
+    -----END CERTIFICATE-----
+    """
+
+    private static let intermediatePEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIB5TCCAWugAwIBAgIUZHS/kwQnv0uJgKEj623bkWTauBQwCgYIKoZIzj0EAwMw
+    HDEaMBgGA1UEAwwRUGVuZ3VpbiBURVNUIFJvb3QwHhcNMjYwNzMwMjIzMTQ4WhcN
+    MzYwNzI3MjIzMTQ4WjAkMSIwIAYDVQQDDBlQZW5ndWluIFRFU1QgSW50ZXJtZWRp
+    YXRlMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAErDTCWwXFVF2L6m1rgO95AVDKJOkD
+    k0OxL1peFKBY/hb5+mLvueaIaNuFVegrC5jMrdo3hWMZCJjQwg2QoZbpNrwiKCpP
+    75eiM2ejmpGQdODyc2ORUQLfYURqIa1z4a5Jo2YwZDASBgNVHRMBAf8ECDAGAQH/
+    AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUHM/eu4x/m+Jauf8Qvfu+pxL0
+    NMwwHwYDVR0jBBgwFoAUspU1x+FgliEZRU0i7QiYda5JX7owCgYIKoZIzj0EAwMD
+    aAAwZQIwdLRZBEFfpFVFSOLW68+H47Br/XegfJr/Na7ClyzVGK94wqwbJTuEuGXT
+    w0sXxV0nAjEAnmXLXNu/PP/bmli3B0pYRsODWc3YXiG1hSKxakxz6d/E5NGPRA76
+    qP1gVQ7E3A3+
+    -----END CERTIFICATE-----
+    """
+
+    // Broker leaf: 800-day validity (> Apple's 398-day system-root cap), SANs
+    // localhost/127.0.0.1/10.0.2.2, signed by the intermediate above.
+    private static let brokerPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIICGDCCAZ6gAwIBAgIURuVk+C+dQXYyxWfnCjFCddBH3XYwCgYIKoZIzj0EAwMw
+    JDEiMCAGA1UEAwwZUGVuZ3VpbiBURVNUIEludGVybWVkaWF0ZTAeFw0yNjA3MzAy
+    MjMxNDhaFw0yODEwMDcyMjMxNDhaMB8xHTAbBgNVBAMMFHBlbmd1aW4tYnJva2Vy
+    LmxvY2FsMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEUeyJRIkjiiCUUy+Yig4mG03G
+    erDoQVluBihhL8EsUxMY+HGhmsMnZBHiEz2wT7fgeMY3K4R7eby8dVMqOgK4pWjl
+    2bhKMi99x/LYy2vxI70CA5CuYgHCL/AsLekWS1Mho4GVMIGSMAwGA1UdEwEB/wQC
+    MAAwCwYDVR0PBAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMCAGA1UdEQQZMBeC
+    CWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQU171C2J19At/K3IJaIxcX
+    jIkpVLswHwYDVR0jBBgwFoAUHM/eu4x/m+Jauf8Qvfu+pxL0NMwwCgYIKoZIzj0E
+    AwMDaAAwZQIwb4YI1+uMZ3KYFiPcLlkytkoQCjDakPxhAZ+geUda0fyy1oxVduLM
+    A8Q3uJsKCzYmAjEAhNlKanvD/rilK8y7FrvlpAwMEBMLnMNsQWPILPTlTAXNJwAS
+    s/CrY+bZ9m1fzFns
+    -----END CERTIFICATE-----
+    """
+
+    // Self-signed impostor with the SAME CN as the broker but no relation to the
+    // trusted root — models an attacker on the gateway Wi-Fi presenting a fake cert.
+    private static let forgedPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIB0DCCAVagAwIBAgIUXcngdQBs/lGg0DEbbzO9R/GsRnQwCgYIKoZIzj0EAwMw
+    HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwHhcNMjYwNzMwMjIzMTQ5
+    WhcNMjcwNzMwMjIzMTQ5WjAfMR0wGwYDVQQDDBRwZW5ndWluLWJyb2tlci5sb2Nh
+    bDB2MBAGByqGSM49AgEGBSuBBAAiA2IABBEkkEkDFKtXwCFlB8dy/vCTExwkAPSt
+    e8az7swFHJf/MsIV7bnA1xvXRCnS6GNLWctMQ5333iYAk35o3eHZj4yvyFVUbC5r
+    5NqaKMgL4DxZawfMv3qm7jtOXvxC8Peed6NTMFEwHQYDVR0OBBYEFFzuS68p5TvX
+    2vgT7smi4L+yGAEMMB8GA1UdIwQYMBaAFFzuS68p5TvX2vgT7smi4L+yGAEMMA8G
+    A1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwMDaAAwZQIwP23nCIpCQtd1uojnc8d0
+    CCqypzEvMnp/D9eQ0GZ9i2JQZEYqUIdyp7zXqX4/ZvLjAjEAsjSyr7JPLfeHJXCC
+    Znze5rLgp0+w2CD/Sqd7gFKiJHkllxIQA7xZD1fmzZ8Q7A02
+    -----END CERTIFICATE-----
+    """
+
+    private static func certificate(fromPEM pem: String) -> SecCertificate {
+        let base64 = pem
+            .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
+            .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+        guard let data = Data(base64Encoded: base64),
+              let cert = SecCertificateCreateWithData(nil, data as CFData) else {
+            fatalError("Failed to parse test fixture certificate")
+        }
+        return cert
+    }
+
+    /// Builds a SecTrust object presenting `leafAndChain` as the server's certificate chain,
+    /// mirroring what CocoaMQTT hands the delegate during a real TLS handshake.
+    private static func makeTrust(presenting leafAndChain: [SecCertificate]) -> SecTrust {
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, nil)
+        let status = SecTrustCreateWithCertificates(leafAndChain as CFArray, policy, &trust)
+        precondition(status == errSecSuccess, "Failed to create SecTrust fixture")
+        return trust!
+    }
+
+    func testEvaluateServerTrust_ValidChainWithRootAnchor_AdminUser_Trusted() {
+        let module = MqttModule()
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        // Admin user: expectedCN is nil, so only chain validation applies.
+        // This is the exact scenario IA-5805 flags: an 800-day leaf (violates Apple's
+        // 398-day cap for system-trusted roots) must still validate against our own anchor.
+        let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])
+
+        XCTAssertTrue(result, "Valid chain to app-provided root anchor should be trusted, even with >398-day leaf")
+    }
+
+    func testEvaluateServerTrust_ValidChainWithIntermediateAnchor_Trusted() {
+        let module = MqttModule()
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+
+        let trust = Self.makeTrust(presenting: [broker])
+
+        let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [intermediate])
+
+        XCTAssertTrue(result, "Anchoring directly on the intermediate should also validate")
+    }
+
+    func testEvaluateServerTrust_ForgedSelfSignedCert_Rejected() {
+        let module = MqttModule()
+        let forged = Self.certificate(fromPEM: Self.forgedPEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [forged])
+
+        // This is the IA-5805 MITM scenario: an attacker on the gateway Wi-Fi presents a
+        // self-signed cert with the broker's CN. Before the fix, admin-mode accepted this
+        // unconditionally (completionHandler(true)). It must now be rejected.
+        let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])
+
+        XCTAssertFalse(result, "Self-signed impostor cert not chaining to our root must be rejected")
+    }
+
+    func testEvaluateServerTrust_ForgedCert_RejectedEvenWithCNPinning() {
+        let module = MqttModule()
+        let forged = Self.certificate(fromPEM: Self.forgedPEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [forged])
+
+        // Non-admin path: even though the forged cert's CN matches exactly, chain
+        // validation must fail first and reject before CN comparison is reached.
+        let result = module.evaluateServerTrust(trust, expectedCN: "penguin-broker.local", anchors: [root])
+
+        XCTAssertFalse(result, "Chain validation must reject the impostor regardless of CN pinning")
+    }
+
+    func testEvaluateServerTrust_NoAnchorsConfigured_Rejected() {
+        let module = MqttModule()
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [])
+
+        XCTAssertFalse(result, "Missing trusted anchors must fail closed, never accept-any")
+    }
+
+    func testEvaluateServerTrust_ValidChainWithMatchingCN_NonAdmin_Trusted() {
+        let module = MqttModule()
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        let result = module.evaluateServerTrust(trust, expectedCN: "penguin-broker.local", anchors: [root])
+
+        XCTAssertTrue(result, "Valid chain + matching CN pin should be trusted")
+    }
+
+    func testEvaluateServerTrust_ValidChainWithMismatchedCN_NonAdmin_Rejected() {
+        let module = MqttModule()
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        let result = module.evaluateServerTrust(trust, expectedCN: "some-other-device.local", anchors: [root])
+
+        XCTAssertFalse(result, "Valid chain but CN pin mismatch must still be rejected for non-admin users")
+    }
 
     // MARK: - Topic-Based Detection Tests (Deterministic)
 
@@ -227,8 +419,8 @@ class MqttModuleTests: XCTestCase {
             invokeCount += 1
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["result"])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["result"])
 
         XCTAssertEqual(invokeCount, 1, "Callback should be invoked once")
     }
@@ -239,19 +431,19 @@ class MqttModuleTests: XCTestCase {
             invokeCount += 1
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["result1"])
-        guard.invoke(["result2"])
-        guard.invoke(["result3"])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["result1"])
+        guardObj.invoke(["result2"])
+        guardObj.invoke(["result3"])
 
         XCTAssertEqual(invokeCount, 1, "Callback should only be invoked once")
     }
 
     func testCallbackGuard_NilCallbackHandling() {
-        let guard = CallbackGuard(nil)
+        let guardObj = CallbackGuard(nil)
 
         // Should not crash with nil callback
-        guard.invoke(["result"])
+        guardObj.invoke(["result"])
 
         // Test passes if no crash occurs
         XCTAssertTrue(true, "Should handle nil callback gracefully")
@@ -268,14 +460,14 @@ class MqttModuleTests: XCTestCase {
             lock.unlock()
         }
 
-        let guard = CallbackGuard(callback)
+        let guardObj = CallbackGuard(callback)
         let group = DispatchGroup()
 
         // Create 10 concurrent invocations
         for _ in 0..<10 {
             group.enter()
             DispatchQueue.global().async {
-                guard.invoke(["result"])
+                guardObj.invoke(["result"])
                 group.leave()
             }
         }
@@ -294,8 +486,8 @@ class MqttModuleTests: XCTestCase {
             receivedArgs = args
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["test-result", 42, true])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["test-result", 42, true])
 
         XCTAssertEqual(receivedArgs.count, 3, "Should receive all arguments")
         XCTAssertEqual(receivedArgs[0] as? String, "test-result")
@@ -309,11 +501,11 @@ class MqttModuleTests: XCTestCase {
             fatalError("Test error")
         }
 
-        let guard = CallbackGuard(callback)
+        let guardObj = CallbackGuard(callback)
 
         // In Swift, we can't easily test fatalError, but we can test
         // that the guard marks the callback as fired even if it would throw
-        guard.invoke(["result"])
+        guardObj.invoke(["result"])
 
         // Second invocation should be suppressed
         var secondCallbackInvoked = false
