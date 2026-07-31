@@ -252,6 +252,41 @@ public class CustomTrustManagerTest {
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
     }
 
+    @Test
+    public void testMatchingIPv4SAN_NonAdmin_Accepted() throws Exception {
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+
+        // getSubjectAlternativeNames() returns iPAddress (type 7) SANs as a raw byte[] on
+        // most JVM/Android implementations, not a String — this guards the fix for that.
+        Object tm = newTrustManager(trustStoreWith(root), null, "127.0.0.1");
+
+        checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+    }
+
+    @Test
+    public void testMatchingSecondIPv4SAN_NonAdmin_Accepted() throws Exception {
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(root), null, "10.0.2.2");
+
+        checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+    }
+
+    @Test(expected = CertificateException.class)
+    public void testMismatchedIPSAN_NonAdmin_Rejected() throws Exception {
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(root), null, "192.168.1.5");
+
+        checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+    }
+
     @Test(expected = CertificateException.class)
     public void testDifferentDeviceCert_SANMismatch_Rejected() throws Exception {
         X509Certificate root = cert(ROOT_PEM);

@@ -86,6 +86,24 @@ class MqttModuleTests: XCTestCase {
     -----END CERTIFICATE-----
     """
 
+    // Expired leaf (valid Jan 1 2024 - Jan 31 2024, already expired), same SANs as brokerPEM.
+    private static let expiredPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIICGDCCAZ6gAwIBAgIURuVk+C+dQXYyxWfnCjFCddBH3XcwCgYIKoZIzj0EAwMw
+    JDEiMCAGA1UEAwwZUGVuZ3VpbiBURVNUIEludGVybWVkaWF0ZTAeFw0yNDAxMDEw
+    NjAwMDFaFw0yNDAxMzEwNjAwMDFaMB8xHTAbBgNVBAMMFHBlbmd1aW4tYnJva2Vy
+    LmxvY2FsMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAETJqM6jY/xEiv9Kt/HeRgEIRl
+    hi+Cdk3qbvEMnlN/8OqD7gsWwcWUU6zpcOzG6hP0qEHCL/OoCr0ATGSiMQrMlhKX
+    CEscjl5FN/itH1YofDtDjCqvHFnW0dxiQ1N+HmaTo4GVMIGSMAwGA1UdEwEB/wQC
+    MAAwCwYDVR0PBAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMCAGA1UdEQQZMBeC
+    CWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQUTDAuTpUBUA/GNArWRnQQ
+    XgG9gWYwHwYDVR0jBBgwFoAUHM/eu4x/m+Jauf8Qvfu+pxL0NMwwCgYIKoZIzj0E
+    AwMDaAAwZQIxAOyxkKwmy9P8TcHIoZC4Ho5+Rh3RQZBcA/Pk8/S+ylDr9n5thcDg
+    t6P+Y1YJoDSAxQIwFXUDfm69ntfjojFKv935MWq+tPgItXXy88GwqM9DWPvREwOG
+    75fd4Fh6a/CXnxRQ
+    -----END CERTIFICATE-----
+    """
+
     private static func certificate(fromPEM pem: String) -> SecCertificate {
         let base64 = pem
             .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
@@ -163,6 +181,22 @@ class MqttModuleTests: XCTestCase {
         let result = module.evaluateServerTrust(trust, expectedCN: "penguin-broker.local", anchors: [root])
 
         XCTAssertFalse(result, "Chain validation must reject the impostor regardless of CN pinning")
+    }
+
+    func testEvaluateServerTrust_ExpiredCert_Rejected() {
+        let module = MqttModule()
+        let expired = Self.certificate(fromPEM: Self.expiredPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [expired, intermediate])
+
+        // Mirrors the Android IA-5806 expiry gap: the old code never called checkValidity().
+        // SecTrustEvaluateWithError enforces expiry, so this must be rejected even though
+        // the cert is validly signed by our trusted root.
+        let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])
+
+        XCTAssertFalse(result, "Expired cert must be rejected by SecTrustEvaluateWithError")
     }
 
     func testEvaluateServerTrust_NoAnchorsConfigured_Rejected() {

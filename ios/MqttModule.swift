@@ -898,7 +898,7 @@ extension MqttModule: CocoaMQTTDelegate {
             return true
         }
 
-        guard let serverCert = SecTrustGetCertificateAtIndex(trust, 0) else {
+        guard let serverCert = Self.leafCertificate(from: trust) else {
             os_log("  ✗ Cannot retrieve server certificate", log: logger, type: .error)
             return false
         }
@@ -915,7 +915,22 @@ extension MqttModule: CocoaMQTTDelegate {
         os_log("  ✓ CN matches: %{public}@", log: logger, type: .info, actualCN)
         return true
     }
-    
+
+    /// Retrieves the leaf certificate from an evaluated trust object.
+    /// `SecTrustGetCertificateAtIndex` is deprecated as of iOS 15 in favor of
+    /// `SecTrustCopyCertificateChain`; this keeps the iOS 12 minimum deployment target
+    /// (per the podspec) working while preferring the modern API where available.
+    private static func leafCertificate(from trust: SecTrust) -> SecCertificate? {
+        if #available(iOS 15.0, *) {
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
+                return nil
+            }
+            return chain.first
+        } else {
+            return SecTrustGetCertificateAtIndex(trust, 0)
+        }
+    }
+
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {
         var elapsed = ""
         if let startTime = connectionStartTime {

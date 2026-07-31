@@ -16,7 +16,9 @@ import info.mqtt.android.service.MqttAndroidClient;
 import org.eclipse.paho.client.mqttv3.*;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import java.io.*;
+import java.net.InetAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -400,10 +402,25 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 for (List<?> san : sans) {
                     Integer type = (Integer) san.get(0);
                     Object value = san.get(1);
-                    // GeneralName type 2 = dNSName, type 7 = iPAddress
+                    // Per the X509Certificate#getSubjectAlternativeNames javadoc, GeneralName
+                    // type 2 (dNSName) and type 7 (iPAddress) are both returned as Strings —
+                    // IPv4 in dotted-quad notation, IPv6 as colon-separated hex groups.
+                    // Only otherName/x400Address/ediPartyName/unrecognized types use byte[].
                     if ((type == 2 || type == 7) && value instanceof String
                             && ((String) value).equalsIgnoreCase(host)) {
                         return true;
+                    }
+                    // Defensive fallback for providers that deviate from the javadoc contract
+                    // and hand back the raw DER-encoded octets for an IP SAN.
+                    if (type == 7 && value instanceof byte[]) {
+                        try {
+                            String ip = InetAddress.getByAddress((byte[]) value).getHostAddress();
+                            if (ip != null && ip.equalsIgnoreCase(host)) {
+                                return true;
+                            }
+                        } catch (UnknownHostException e) {
+                            // Malformed IP SAN — not a match, keep checking other SAN entries
+                        }
                     }
                 }
             } catch (CertificateParsingException e) {
