@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Handle absolute keystore paths from ecc-csr 1.3.1+ (Issue #21)**
+  - `loadSoftwareKeyStore()` now uses `File.isAbsolute()` to distinguish absolute paths (used directly) from relative paths (resolved against `filesDir`)
+  - Fixes path doubling bug where absolute paths like `/data/user/0/com.app/files/software_keys.p12` were incorrectly prepended with `filesDir`, resulting in `/data/user/0/com.app/files/data/user/0/com.app/files/software_keys.p12`
+  - Backward compatible: relative paths, null, and empty defaults behave unchanged
+  - Related: react-native-ecc-csr 1.3.1 now returns explicit keystore descriptors with absolute paths
+
 ## [1.3.0] - 2026-07-20
 
 ### ⚠️ BREAKING CHANGE

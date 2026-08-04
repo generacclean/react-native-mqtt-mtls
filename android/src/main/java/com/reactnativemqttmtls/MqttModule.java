@@ -1093,14 +1093,22 @@ public class MqttModule extends ReactContextBaseJavaModule {
         String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
         String password = (keystorePassword != null) ? keystorePassword : "";
 
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
+        // Handle both absolute and relative paths (Issue #21)
+        // Absolute paths (from ecc-csr 1.3.1+) are used directly
+        // Relative paths (legacy/default) are resolved against filesDir
+        File keystoreFile;
+        File candidate = new File(filename);
+        if (candidate.isAbsolute()) {
+            keystoreFile = candidate;
+        } else {
+            keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
+        }
 
         // Check if keystore file exists
         if (!keystoreFile.exists()) {
             throw new KeyException(
-                "Software keystore not found: " + filename +
-                ". Ensure CSR module has run and created the keystore file. " +
-                "Expected location: " + keystoreFile.getAbsolutePath()
+                "Software keystore not found: " + keystoreFile.getAbsolutePath() +
+                ". Ensure CSR module has run and created the keystore file."
             );
         }
 
