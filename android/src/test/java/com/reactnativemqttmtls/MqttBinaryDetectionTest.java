@@ -175,6 +175,19 @@ public class MqttBinaryDetectionTest {
             isBinaryData("penguin/device/config", payload));
     }
 
+    @Test
+    public void testTopicCollision_NetworkBeforeConfig() throws Exception {
+        // High byte (0x80) makes this non-text; classifying it as text would corrupt the bytes.
+        byte[] protobufPayload = {0x0a, 0x02, 0x08, (byte) 0x80};
+
+        // Network config/state responses are protobuf but their topics contain "/config",
+        // so "/network/" must win over the "/config" text rule.
+        assertTrue("Network pattern matches before config",
+            isBinaryData("remote/network/config/post/accepted", protobufPayload));
+        assertTrue("Network state responses are binary",
+            isBinaryData("remote/network/state", protobufPayload));
+    }
+
     // ========================================================================
     // UTF-8 Heuristic Fallback Tests (Unknown Topics)
     // ========================================================================
@@ -387,16 +400,9 @@ public class MqttBinaryDetectionTest {
             0x0a, 0x09, 'M', 'y', 'W', 'i', 'F', 'i', '-', '5', 'G'  // SSID
         };
 
-        // NOTE: This topic contains "/config" which is classified as text by topic pattern.
-        // This is a known collision - the topic pattern takes precedence.
-        // In production, if network config uses protobuf, the topic should be:
-        // "remote/network/proto/config" or similar to avoid collision.
-        assertFalse("Config topics are classified as text (collision with text pattern)",
+        // Network responses are protobuf; "/network/" wins over the "/config" text rule.
+        assertTrue("Network config responses are classified as binary",
             isBinaryData("remote/network/config/get/accepted", networkConfig));
-
-        // This would work correctly with proper topic naming:
-        assertTrue("Proto topics correctly classified as binary",
-            isBinaryData("remote/network/proto/config/get/accepted", networkConfig));
     }
 
     @Test
