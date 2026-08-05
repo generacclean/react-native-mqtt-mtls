@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.2]
+
+### Fixed
+
+- **Classify `/network/` topics as binary so protobuf responses parse (GREM-50)**
+  - `isBinaryData` classified network config/state responses as text because their topics contain `/config`, then lossily UTF-8-decoded the payload (U+FFFD for bytes > 0x7F), corrupting the protobuf before JS received it
+  - Adds `/network/` to the binary branch ahead of the `/config` text rule on both iOS and Android, so these payloads are base64-encoded losslessly
+  - `/network/` requires the trailing slash, so `penguin/config/network` still classifies as text
+
 ## [1.3.0] - 2026-07-20
 
 ### ⚠️ BREAKING CHANGE
@@ -19,12 +28,14 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - **Security documentation and test coverage for `isAdminUser` parameter**
+
   - Added comprehensive security warnings in `src/types.ts` JSDoc
   - Added "Security Considerations" section to `README.md` with production/dev examples
   - Added 20 test cases in `__tests__/isAdminUser-default.test.ts`
   - Documents the security implications of admin mode vs secure mode
 
 - **Comprehensive test coverage for binary detection**
+
   - Android: `MqttBinaryDetectionTest.java` uses reflection to test real `isBinaryData(String topic, byte[] payload)` method
   - iOS: `MqttModuleTests.swift` now tests real `isBinaryData(topic:data:)` method (made `internal` for testing)
   - Topic collision tests: Verify binary-first precedence (`/device/config` → binary, not text)
@@ -54,20 +65,24 @@ All notable changes to this project will be documented in this file.
 ### Technical Details
 
 **Android Layer (`android/src/main/java/com/reactnativemqttmtls/MqttModule.java`):**
+
 - Line 49-91: Enhanced `isBinaryData()` documentation with asymmetry notes and sync reminders
 - Line 1020-1114: New `loadSoftwareKeyStore()` with dual-format support
 - Line 44-46: Static `FULL_BC_PROVIDER` to avoid system BC conflicts
 
 **iOS Layer (`ios/MqttModule.swift`):**
+
 - Line 14-28: Enhanced `isBinaryData()` documentation and changed to `internal` visibility
 - Line 28-65: Topic-based binary detection (matches Android patterns)
 
 **Test Coverage (`android/src/test/java/com/reactnativemqttmtls/MqttBinaryDetectionTest.java`):**
+
 - 464 lines of comprehensive binary detection tests
 - Uses reflection to access private `isBinaryData(String, byte[])` method
 - Tests all topic patterns, collision cases, and ASCII protobuf edge cases
 
 **Test Coverage (`ios/MqttModuleTests.swift`):**
+
 - Updated to test real `MqttModule.isBinaryData(topic:data:)` method
 - Removed duplicate single-arg helper method
 - Added topic collision and ASCII protobuf edge case tests
@@ -75,12 +90,14 @@ All notable changes to this project will be documented in this file.
 ### Migration
 
 **BREAKING CHANGE - `isAdminUser` default**:
+
 - If your code does NOT pass `isAdminUser` and relies on the default, you must update:
   - **Option 1**: Add `isAdminUser: true` (for dev/test environments only)
   - **Option 2**: Add `sniHostname` and `brokerCommonName` (recommended for production)
 - See `docs/SECURITY_DEFAULT_CHANGE.md` for detailed migration steps
 
 **Non-breaking enhancements**:
+
 - Encrypted keystore is optional (falls back to plain PKCS12)
 - Topic patterns match existing production usage
 - Binary detection behavior unchanged for known topics
@@ -91,12 +108,14 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **CRITICAL:** Callback double-invocation crashes on Android and iOS
+
   - **Root Cause:** Network disconnects or publish failures could trigger both success and error callbacks
   - **Impact:** App crashes (SIGABRT) from React Native bridge's single-fire invariant violation
   - **Solution:** Added callback guards (`safeInvoke` on Android, `CallbackGuard` on iOS) with atomic flags
   - **Additional Fix (iOS):** Connect callbacks now use shared settled state for mutual exclusion (matches Android behavior)
 
 - **CRITICAL:** Type declaration mismatch in `index.d.ts`
+
   - **Root Cause:** Public API declared `message: string | ArrayBuffer`, but runtime delivers `string | Uint8Array`
   - **Impact:** TypeScript consumers receive wrong types, breaking `.length`, index access, `Buffer.from()`
   - **Solution:** Changed type to `message: string | Uint8Array` to match actual runtime behavior
@@ -116,14 +135,17 @@ All notable changes to this project will be documented in this file.
 ### Technical Details
 
 **Android Layer (`android/src/main/java/com/reactnativemqttmtls/MqttModule.java`):**
+
 - Line 67-114: Rewrote `isBinaryData()` with topic-based detection
 - Line 124-137: Added `safeInvoke()` for callback double-invocation prevention
 
 **iOS Layer (`ios/MqttModule.swift`):**
+
 - Line 28-70: Rewrote `isBinaryData()` with topic-based detection
 - Line 134-168: Added shared settled guard for connect callbacks (mutual exclusion)
 
 **TypeScript Layer (`index.d.ts`):**
+
 - Line 6: Changed `message: string | ArrayBuffer` → `message: string | Uint8Array`
 
 ## [1.1.1] - 2026-06-25
