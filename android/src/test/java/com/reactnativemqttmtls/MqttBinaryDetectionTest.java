@@ -186,6 +186,8 @@ public class MqttBinaryDetectionTest {
             isBinaryData("remote/network/config/post/accepted", protobufPayload));
         assertTrue("Network state responses are binary",
             isBinaryData("remote/network/state", protobufPayload));
+        assertTrue("Proto pattern also wins over config",
+            isBinaryData("remote/network/proto/config/get/accepted", protobufPayload));
     }
 
     // ========================================================================

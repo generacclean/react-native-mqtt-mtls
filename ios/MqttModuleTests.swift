@@ -115,6 +115,9 @@ class MqttModuleTests: XCTestCase {
         XCTAssertTrue(
             module.isBinaryData(topic: "remote/network/state", data: protobufPayload),
             "network state responses are binary")
+        XCTAssertTrue(
+            module.isBinaryData(topic: "remote/network/proto/config/get/accepted", data: protobufPayload),
+            "/proto/ also takes precedence over /config")
     }
 
     // MARK: - ASCII Protobuf Edge Cases

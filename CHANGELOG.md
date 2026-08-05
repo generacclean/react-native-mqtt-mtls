@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.2]
+## [1.3.2] - 2026-08-05
+
+> `1.3.1` is skipped intentionally: it is claimed by the concurrent keystore-path branch, whose `1.3.1` betas are already published and pinned by consumers.
 
 ### Fixed
 
