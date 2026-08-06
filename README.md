@@ -350,7 +350,7 @@ MIIDXTCCAkWgAwIBAgIJAKL0UG+mRqS...
 
 The library uses a two-tier detection strategy for incoming messages:
 
-1. **Topic-based detection (deterministic)**: Known binary/text topics (e.g., `/proto/`, `/device`, `/firmware`, `/status`, `/config`) are classified by pattern matching
+1. **Topic-based detection (deterministic)**: Known binary/text topics (e.g., `/proto/`, `/device`, `/network/`, `/firmware`, `/status`, `/config`) are classified by pattern matching. Binary patterns are evaluated before text patterns, so `/network/` (protobuf) wins over `/config` for topics like `remote/network/config/...`
 2. **UTF-8 heuristic (fallback)**: Unknown topics are classified by attempting UTF-8 decoding
 
 **⚠️ Limitation**: The UTF-8 fallback can **misclassify small protobuf messages** with all-ASCII content as text. This occurs when:

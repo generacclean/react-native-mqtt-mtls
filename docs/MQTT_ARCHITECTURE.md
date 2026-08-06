@@ -540,9 +540,11 @@ private boolean isBinaryData(String topic, byte[] payload) {
     // DETERMINISTIC: Topic-based detection for known binary message patterns
     if (topic != null) {
         // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+        // /network/ is listed here, ahead of the /config text rule below, because
+        // network config/state responses are protobuf but their topics contain /config.
         if (topic.contains("/proto/") || topic.contains("/device") ||
             topic.contains("/rma") || topic.contains("/assembly") ||
-            topic.contains("/installed")) {
+            topic.contains("/installed") || topic.contains("/network/")) {
             return true;
         }
         
@@ -603,9 +605,11 @@ private func isBinaryData(topic: String, data: Data) -> Bool {
     // DETERMINISTIC: Topic-based detection for known binary message patterns
     
     // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+    // /network/ is listed here, ahead of the /config text rule below, because
+    // network config/state responses are protobuf but their topics contain /config.
     if topic.contains("/proto/") || topic.contains("/device") ||
        topic.contains("/rma") || topic.contains("/assembly") ||
-       topic.contains("/installed") {
+       topic.contains("/installed") || topic.contains("/network/") {
         return true
     }
     
