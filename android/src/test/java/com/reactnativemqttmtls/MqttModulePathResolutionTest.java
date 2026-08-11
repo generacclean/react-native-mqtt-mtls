@@ -102,4 +102,19 @@ public class MqttModulePathResolutionTest {
         assertTrue("Empty path should default under filesDir: " + message,
             message.contains(FILES_DIR_PATH + File.separator + "software_keys.p12"));
     }
+
+    @Test
+    public void testAbsolutePath_OutsideFilesDir_Rejected() throws Exception {
+        String outsidePath = "/data/user/0/com.other.app/files/evil.p12";
+
+        try {
+            loadSoftwareKeyStoreMethod.invoke(mqttModule, outsidePath, null, null);
+            fail("Expected KeyException for a keystore path outside app-private storage");
+        } catch (InvocationTargetException e) {
+            assertTrue("Expected KeyException, got " + e.getCause(),
+                e.getCause() instanceof KeyException);
+            assertTrue("Message should mention app-private storage: " + e.getCause().getMessage(),
+                e.getCause().getMessage().contains("app-private storage"));
+        }
+    }
 }

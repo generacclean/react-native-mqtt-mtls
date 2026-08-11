@@ -12,12 +12,12 @@ import Security
 
 class MqttModuleTests: XCTestCase {
 
-    // MARK: - Server Trust Validation Tests (IA-5805)
+    // MARK: - Server Trust Validation Tests
     //
-    // Fixtures below are a real EC P-384 chain generated with openssl, mirroring the
-    // spike referenced in IA-5805: Penguin TEST Root -> Intermediate -> broker leaf
-    // (800-day validity, SANs localhost/127.0.0.1/10.0.2.2), plus a self-signed
-    // "forged" cert with the same CN but no relation to the root — the MITM impostor.
+    // Fixtures below are a real EC P-384 chain generated with openssl: Penguin TEST Root ->
+    // Intermediate -> broker leaf (800-day validity, SANs localhost/127.0.0.1/10.0.2.2),
+    // plus a self-signed "forged" cert with the same CN but no relation to the root — the
+    // MITM impostor.
 
     private static let rootPEM = """
     -----BEGIN CERTIFICATE-----
@@ -134,9 +134,9 @@ class MqttModuleTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [broker, intermediate])
 
-        // Admin user: expectedCN is nil, so only chain validation applies.
-        // This is the exact scenario IA-5805 flags: an 800-day leaf (violates Apple's
-        // 398-day cap for system-trusted roots) must still validate against our own anchor.
+        // Admin user: expectedCN is nil, so only chain validation applies. An 800-day leaf
+        // (violates Apple's 398-day cap for system-trusted roots) must still validate against
+        // our own app-provided anchor, since we exclude system roots.
         let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])
 
         XCTAssertTrue(result, "Valid chain to app-provided root anchor should be trusted, even with >398-day leaf")
@@ -161,9 +161,8 @@ class MqttModuleTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [forged])
 
-        // This is the IA-5805 MITM scenario: an attacker on the gateway Wi-Fi presents a
-        // self-signed cert with the broker's CN. Before the fix, admin-mode accepted this
-        // unconditionally (completionHandler(true)). It must now be rejected.
+        // A self-signed cert presenting the broker's CN but not chaining to our trusted root
+        // (e.g. an attacker on the gateway Wi-Fi) must be rejected, admin mode or not.
         let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])
 
         XCTAssertFalse(result, "Self-signed impostor cert not chaining to our root must be rejected")
@@ -191,7 +190,6 @@ class MqttModuleTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [expired, intermediate])
 
-        // Mirrors the Android IA-5806 expiry gap: the old code never called checkValidity().
         // SecTrustEvaluateWithError enforces expiry, so this must be rejected even though
         // the cert is validly signed by our trusted root.
         let result = module.evaluateServerTrust(trust, expectedCN: nil, anchors: [root])

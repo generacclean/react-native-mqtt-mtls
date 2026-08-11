@@ -19,15 +19,14 @@ import java.util.Collection;
 import static org.junit.Assert.*;
 
 /**
- * Regression tests for CustomTrustManager (IA-5806).
+ * Regression tests for CustomTrustManager.
  *
  * Verifies:
- * - Chain validation now goes through CertPathValidator (PKIX) instead of manual
- *   per-issuer signature loops (expiry, path-length, basic-constraints checks included).
- * - Hostname/SAN matching against the dialed host is enforced when a host is configured.
+ * - Chain validation goes through CertPathValidator (PKIX), enforcing expiry, path-length,
+ *   basic-constraints, and signature checks.
+ * - Hostname/SAN matching against the expected SNI host is enforced when configured.
  * - isAdminUser semantics: chain validation always runs; CN and hostname/SAN pinning
- *   are skipped only when expectedBrokerCN / expectedHost are null (admin mode), mirroring
- *   the iOS fix in IA-5805.
+ *   are skipped only when expectedBrokerCN / expectedSniHost are null (admin mode).
  *
  * Fixtures are a real EC P-384 chain generated with openssl: Penguin TEST Root ->
  * Intermediate -> broker leaf (800-day validity, SANs localhost/127.0.0.1/10.0.2.2),
@@ -142,12 +141,12 @@ public class CustomTrustManagerTest {
     }
 
     /** Constructs the private CustomTrustManager(KeyStore, String, String) via reflection. */
-    private static Object newTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedHost)
+    private static Object newTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost)
             throws Exception {
         Class<?> clazz = Class.forName("com.reactnativemqttmtls.MqttModule$CustomTrustManager");
         Constructor<?> ctor = clazz.getDeclaredConstructor(KeyStore.class, String.class, String.class);
         ctor.setAccessible(true);
-        return ctor.newInstance(trustStore, expectedBrokerCN, expectedHost);
+        return ctor.newInstance(trustStore, expectedBrokerCN, expectedSniHost);
     }
 
     private static void checkServerTrusted(Object trustManager, X509Certificate[] chain) throws Exception {
@@ -199,8 +198,8 @@ public class CustomTrustManagerTest {
 
         Object tm = newTrustManager(trustStoreWith(root), null, null);
 
-        // This is the IA-5806 gap: no checkValidity() call meant an expired cert with a
-        // valid signature chain was accepted. CertPathValidator now enforces expiry.
+        // An expired cert with a valid signature chain must be rejected — CertPathValidator
+        // enforces expiry.
         checkServerTrusted(tm, new X509Certificate[] { expired, intermediate });
     }
 
@@ -223,7 +222,7 @@ public class CustomTrustManagerTest {
     }
 
     // ========================================================================
-    // Hostname/SAN matching (new in IA-5806) — gated by isAdminUser via expectedHost
+    // SNI host/SAN matching — gated by isAdminUser via expectedSniHost
     // ========================================================================
 
     @Test
@@ -244,9 +243,8 @@ public class CustomTrustManagerTest {
         X509Certificate broker = cert(BROKER_PEM);
 
         // Cert chain-validates fine and is trusted by our CA, but its SANs
-        // (localhost/127.0.0.1/10.0.2.2) don't include "some-other-broker.local" —
-        // this is the exact gap IA-5806 flags: "A cert validly issued by a trusted CA
-        // for host A is accepted when connecting to host B."
+        // (localhost/127.0.0.1/10.0.2.2) don't include "some-other-broker.local" — a cert
+        // validly issued by a trusted CA for one host must not be accepted for another.
         Object tm = newTrustManager(trustStoreWith(root), null, "some-other-broker.local");
 
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
@@ -258,8 +256,9 @@ public class CustomTrustManagerTest {
         X509Certificate intermediate = cert(INTERMEDIATE_PEM);
         X509Certificate broker = cert(BROKER_PEM);
 
-        // getSubjectAlternativeNames() returns iPAddress (type 7) SANs as a raw byte[] on
-        // most JVM/Android implementations, not a String — this guards the fix for that.
+        // getSubjectAlternativeNames() returns iPAddress (type 7) SANs as a String on the
+        // standard provider (matching MqttModule's certificateMatchesHost comment); this
+        // exercises that path directly.
         Object tm = newTrustManager(trustStoreWith(root), null, "127.0.0.1");
 
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
@@ -301,13 +300,15 @@ public class CustomTrustManagerTest {
     }
 
     @Test
-    public void testAdminUser_HostPinSkipped_ChainStillValidated() throws Exception {
+    public void testAdminUser_ForeignDeviceCert_Accepted_HostPinSkipped() throws Exception {
         X509Certificate root = cert(ROOT_PEM);
         X509Certificate intermediate = cert(INTERMEDIATE_PEM);
         X509Certificate otherHost = cert(OTHER_HOST_PEM);
 
-        // Admin mode: expectedHost is null, so the SAN pin is skipped — but the cert must
-        // still be a validly-chained cert from a trusted CA (it is here).
+        // Admin mode: expectedSniHost is null, so the SAN pin is skipped. This is the accepted
+        // residual risk for admin/fleet connections — a certificate validly issued for a
+        // different device is accepted as long as it chains to a trusted CA. Chain validation
+        // (expiry, path, signature) still runs and would reject anything not CA-issued.
         Object tm = newTrustManager(trustStoreWith(root), null, null);
 
         checkServerTrusted(tm, new X509Certificate[] { otherHost, intermediate });

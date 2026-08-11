@@ -6,11 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Server-certificate trust validation on Android and iOS**
+  - **Android**: `CustomTrustManager.checkServerTrusted` validated the chain via hand-rolled per-issuer signature loops with no expiry check and no hostname/SAN matching, so a certificate validly issued by a trusted CA for one host was accepted when connecting to a different host, and expired certificates were accepted. Replaced with the platform `CertPathValidator` ("PKIX"), which enforces expiry, path-length, and basic-constraints, and added SAN matching against the expected SNI host.
+  - **iOS**: `didReceive(trust:)` accepted any server certificate unconditionally in admin mode, and only did a CN string comparison otherwise — the app-provided root CA bundle was parsed but never evaluated against the presented chain. Now validates the chain via `SecTrustEvaluateWithError` against app-provided anchors unconditionally; admin mode only skips the CN pin, never chain validation.
+  - On both platforms, chain validation always runs; CN/SNI pinning is skipped only when no expected value is configured (admin mode).
+
 - **Handle absolute keystore paths from ecc-csr 1.3.1+ (Issue #21)**
   - `loadSoftwareKeyStore()` now uses `File.isAbsolute()` to distinguish absolute paths (used directly) from relative paths (resolved against `filesDir`)
   - Fixes path doubling bug where absolute paths like `/data/user/0/com.app/files/software_keys.p12` were incorrectly prepended with `filesDir`, resulting in `/data/user/0/com.app/files/data/user/0/com.app/files/software_keys.p12`
   - Backward compatible: relative paths, null, and empty defaults behave unchanged
   - Related: react-native-ecc-csr 1.3.1 now returns explicit keystore descriptors with absolute paths
+  - Resolved keystore paths (absolute or relative) are now checked to remain inside app-private storage before being opened
 
 ## [1.3.0] - 2026-07-20
 

@@ -878,9 +878,9 @@ extension MqttModule: CocoaMQTTDelegate {
         }
 
         let policy = SecPolicyCreateSSL(true, nil)
-        SecTrustSetPolicies(trust, policy)
-        SecTrustSetAnchorCertificates(trust, anchors as CFArray)
-        SecTrustSetAnchorCertificatesOnly(trust, true)  // exclude system roots — only our anchors are trusted
+        _ = SecTrustSetPolicies(trust, policy)
+        _ = SecTrustSetAnchorCertificates(trust, anchors as CFArray)
+        _ = SecTrustSetAnchorCertificatesOnly(trust, true)  // exclude system roots — only our anchors are trusted
 
         var trustError: CFError?
         let chainIsTrusted = SecTrustEvaluateWithError(trust, &trustError)

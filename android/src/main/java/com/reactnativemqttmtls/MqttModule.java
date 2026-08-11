@@ -260,11 +260,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private static class CustomTrustManager implements X509TrustManager {
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
-        private final String expectedHost;
+        private final String expectedSniHost;
 
-        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedHost) throws Exception {
+        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost) throws Exception {
             this.expectedBrokerCN = expectedBrokerCN;
-            this.expectedHost = expectedHost;
+            this.expectedSniHost = expectedSniHost;
 
             List<X509Certificate> certs = new ArrayList<>();
             Enumeration<String> aliases = trustStore.aliases();
@@ -283,13 +283,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
             if (expectedBrokerCN != null && !expectedBrokerCN.isEmpty()) {
                 Log.d(TAG, "Expected broker CN: " + expectedBrokerCN);
             } else {
-                Log.d(TAG, "Broker CN validation skipped (admin user)");
+                Log.d(TAG, "No expected broker CN configured — CN pin skipped");
             }
 
-            if (expectedHost != null && !expectedHost.isEmpty()) {
-                Log.d(TAG, "Expected broker host (SAN pin): " + expectedHost);
+            if (expectedSniHost != null && !expectedSniHost.isEmpty()) {
+                Log.d(TAG, "Expected SNI host (SAN pin): " + expectedSniHost);
             } else {
-                Log.d(TAG, "Broker hostname/SAN pinning skipped (admin user)");
+                Log.d(TAG, "No expected SNI host configured — SAN pin skipped");
             }
         }
 
@@ -307,7 +307,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             X509Certificate serverCert = chain[0];
 
             // Chain validation always runs, admin or not — isAdminUser only ever skips the
-            // CN/hostname pins below (mirrors iOS admin semantics from IA-5805).
+            // CN/SNI pins below.
             validateCertificateChain(chain);
             Log.d(TAG, "✓ Server certificate chain validated via CertPathValidator (PKIX)");
 
@@ -324,14 +324,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 Log.d(TAG, "✓ Broker CN validated: " + brokerCN);
             }
 
-            // Hostname/SAN validation only for non-admin users (expectedHost will be null for admin)
-            if (expectedHost != null && !expectedHost.isEmpty()) {
-                if (!certificateMatchesHost(serverCert, expectedHost)) {
-                    Log.e(TAG, "SAN MISMATCH! No SAN entry on server certificate matches host: " + expectedHost);
+            // SNI host/SAN validation only for non-admin users (expectedSniHost will be null for admin)
+            if (expectedSniHost != null && !expectedSniHost.isEmpty()) {
+                if (!certificateMatchesHost(serverCert, expectedSniHost)) {
+                    Log.e(TAG, "SAN MISMATCH! No SAN entry on server certificate matches SNI host: " + expectedSniHost);
                     throw new CertificateException(
-                            "Broker certificate SAN does not match dialed host: " + expectedHost);
+                            "Broker certificate SAN does not match SNI host: " + expectedSniHost);
                 }
-                Log.d(TAG, "✓ Broker certificate SAN matched dialed host: " + expectedHost);
+                Log.d(TAG, "✓ Broker certificate SAN matched SNI host: " + expectedSniHost);
             }
         }
 
@@ -391,9 +391,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         /**
          * Checks whether any DNS or IP subjectAltName entry on the certificate matches the
-         * dialed host exactly (no wildcard matching — this is a private IoT trust boundary).
+         * expected SNI host exactly (no wildcard matching — this is a private IoT trust boundary).
          */
-        private boolean certificateMatchesHost(X509Certificate cert, String host) {
+        private boolean certificateMatchesHost(X509Certificate cert, String sniHost) {
             try {
                 Collection<List<?>> sans = cert.getSubjectAlternativeNames();
                 if (sans == null) {
@@ -407,15 +407,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     // IPv4 in dotted-quad notation, IPv6 as colon-separated hex groups.
                     // Only otherName/x400Address/ediPartyName/unrecognized types use byte[].
                     if ((type == 2 || type == 7) && value instanceof String
-                            && ((String) value).equalsIgnoreCase(host)) {
+                            && ((String) value).equalsIgnoreCase(sniHost)) {
                         return true;
                     }
                     // Defensive fallback for providers that deviate from the javadoc contract
-                    // and hand back the raw DER-encoded octets for an IP SAN.
+                    // and hand back raw DER-encoded octets for an IP SAN instead of a String.
+                    // Not exercised by the standard provider used in tests — both IP SAN tests
+                    // hit the String branch above.
                     if (type == 7 && value instanceof byte[]) {
                         try {
                             String ip = InetAddress.getByAddress((byte[]) value).getHostAddress();
-                            if (ip != null && ip.equalsIgnoreCase(host)) {
+                            if (ip != null && ip.equalsIgnoreCase(sniHost)) {
                                 return true;
                             }
                         } catch (UnknownHostException e) {
@@ -579,7 +581,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("rootCa"),
                     privateKeyAlias,
                     effectiveBrokerCN,  // null for admin — skips CN validation
-                    effectiveSniHost,   // null for admin — skips hostname/SAN pin (chain validation still runs)
+                    effectiveSniHost,   // null for admin — skips SNI/SAN pin (chain validation still runs)
                     keystorePath,
                     keystorePassword,
                     keystoreFormat);
@@ -679,7 +681,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String rootPem,
             String privateKeyAlias,
             String expectedBrokerCN,
-            String expectedHost,
+            String expectedSniHost,
             String keystorePath,
             String keystorePassword,
             String keystoreFormat) throws Exception {
@@ -741,7 +743,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         };
 
         // Setup TrustManager
-        // expectedBrokerCN/expectedHost are null for admin users — CN and hostname/SAN pinning
+        // expectedBrokerCN/expectedSniHost are null for admin users — CN and SNI/SAN pinning
         // are skipped, but certificate chain validation (via CertPathValidator) always runs
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         trustStore.load(null, null);
@@ -751,7 +753,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         TrustManager[] trustManagers = new TrustManager[] {
-                new CustomTrustManager(trustStore, expectedBrokerCN, expectedHost)
+                new CustomTrustManager(trustStore, expectedBrokerCN, expectedSniHost)
         };
 
         // Create SSL context with TLS 1.3
@@ -1093,15 +1095,22 @@ public class MqttModule extends ReactContextBaseJavaModule {
         String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
         String password = (keystorePassword != null) ? keystorePassword : "";
 
-        // Handle both absolute and relative paths (Issue #21)
-        // Absolute paths (from ecc-csr 1.3.1+) are used directly
-        // Relative paths (legacy/default) are resolved against filesDir
+        // Absolute paths (from ecc-csr 1.3.1+) are used directly; relative paths
+        // (legacy/default) are resolved against filesDir.
         File keystoreFile;
         File candidate = new File(filename);
+        File filesDir = getReactApplicationContext().getFilesDir();
         if (candidate.isAbsolute()) {
             keystoreFile = candidate;
         } else {
-            keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
+            keystoreFile = new File(filesDir, filename);
+        }
+
+        // Containment check: the resolved path must stay within app-private storage,
+        // even for absolute paths supplied across the RN bridge.
+        String canonicalKeystorePath = keystoreFile.getCanonicalPath();
+        if (!canonicalKeystorePath.startsWith(filesDir.getCanonicalPath() + File.separator)) {
+            throw new KeyException("Keystore path must be inside app-private storage: " + canonicalKeystorePath);
         }
 
         // Check if keystore file exists
