@@ -16,9 +16,7 @@ import info.mqtt.android.service.MqttAndroidClient;
 import org.eclipse.paho.client.mqttv3.*;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import java.io.*;
-import java.net.InetAddress;
 import java.net.Socket;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -395,41 +393,37 @@ public class MqttModule extends ReactContextBaseJavaModule {
         /**
          * Checks whether any DNS or IP subjectAltName entry on the certificate matches the
          * expected SNI host exactly (no wildcard matching — this is a private IoT trust boundary).
+         *
+         * Returns false only for a genuine mismatch. An unparseable or absent SAN extension
+         * throws instead, so the three ways this check can fail do not collapse into one
+         * "SAN does not match" message and send the installer after the wrong problem.
          */
-        private boolean certificateMatchesHost(X509Certificate cert, String sniHost) {
+        private boolean certificateMatchesHost(X509Certificate cert, String sniHost)
+                throws CertificateException {
+            Collection<List<?>> sans;
             try {
-                Collection<List<?>> sans = cert.getSubjectAlternativeNames();
-                if (sans == null) {
-                    return false;
-                }
-                for (List<?> san : sans) {
-                    Integer type = (Integer) san.get(0);
-                    Object value = san.get(1);
-                    // Per the X509Certificate#getSubjectAlternativeNames javadoc, GeneralName
-                    // type 2 (dNSName) and type 7 (iPAddress) are both returned as Strings —
-                    // IPv4 in dotted-quad notation, IPv6 as colon-separated hex groups.
-                    // Only otherName/x400Address/ediPartyName/unrecognized types use byte[].
-                    if ((type == 2 || type == 7) && value instanceof String
-                            && ((String) value).equalsIgnoreCase(sniHost)) {
-                        return true;
-                    }
-                    // Defensive fallback for providers that deviate from the javadoc contract
-                    // and hand back raw DER-encoded octets for an IP SAN instead of a String.
-                    // Not exercised by the standard provider used in tests — both IP SAN tests
-                    // hit the String branch above.
-                    if (type == 7 && value instanceof byte[]) {
-                        try {
-                            String ip = InetAddress.getByAddress((byte[]) value).getHostAddress();
-                            if (ip != null && ip.equalsIgnoreCase(sniHost)) {
-                                return true;
-                            }
-                        } catch (UnknownHostException e) {
-                            // Malformed IP SAN — not a match, keep checking other SAN entries
-                        }
-                    }
-                }
+                sans = cert.getSubjectAlternativeNames();
             } catch (CertificateParsingException e) {
-                Log.e(TAG, "Failed to parse SANs from server certificate", e);
+                throw new CertificateException(
+                        "Cannot parse the subjectAltName extension on the broker certificate", e);
+            }
+            if (sans == null) {
+                throw new CertificateException(
+                        "Broker certificate has no subjectAltName extension, so it cannot be bound "
+                        + "to SNI host: " + sniHost);
+            }
+            for (List<?> san : sans) {
+                Integer type = (Integer) san.get(0);
+                Object value = san.get(1);
+                // Per the X509Certificate#getSubjectAlternativeNames javadoc, GeneralName
+                // type 2 (dNSName) and type 7 (iPAddress) are both returned as Strings —
+                // IPv4 in dotted-quad notation, IPv6 as colon-separated hex groups.
+                // Only otherName/x400Address/ediPartyName/unrecognized types use byte[], so
+                // there is no byte[] branch here: it would be unreachable and untested.
+                if ((type == 2 || type == 7) && value instanceof String
+                        && ((String) value).equalsIgnoreCase(sniHost)) {
+                    return true;
+                }
             }
             return false;
         }
@@ -1163,11 +1157,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * 1. Encrypted PKCS12 (new format) - written by react-native-ecc-csr with EncryptedFile
      * 2. Plain PKCS12 (legacy format) - written by older CSR module versions
      *
-     * This addresses PR #4 reviewer Blocker B by making the keystore contract explicit.
-     * The path, password, and format are now API parameters instead of hidden filesystem conventions.
+     * The path, password, and format are API parameters rather than hidden filesystem conventions,
+     * so the keystore contract between this module and the CSR module is explicit.
+     *
+     * The plain-PKCS12 branch is a migration bridge, not a supported format: it exists so a device
+     * that provisioned its key before ecc-csr wrote EncryptedFile keystores keeps connecting after
+     * an app upgrade. Those keystores are never rewritten in place, so the branch cannot be removed
+     * until every device in the field has re-provisioned; drop it when that is confirmed rather
+     * than on a chosen version.
      *
      * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE);
-     *                     see {@link #resolveKeystoreFile(String)} for how it is resolved
+     *                     see {@link #resolveKeystoreFile(String, List)} for how it is resolved
      * @param keystorePassword Password for keystore, or null to use empty string
      * @param keystoreFormat Format hint: "pkcs12", "encrypted", or null for auto-detect
      * @return KeyStore loaded from the specified keystore file

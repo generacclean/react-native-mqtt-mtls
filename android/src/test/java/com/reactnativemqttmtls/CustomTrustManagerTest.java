@@ -31,6 +31,13 @@ import static org.junit.Assert.*;
  * Fixtures are a real EC P-384 chain generated with openssl: Penguin TEST Root ->
  * Intermediate -> broker leaf (800-day validity, SANs localhost/127.0.0.1/10.0.2.2),
  * plus an expired leaf and a leaf issued for a different host's SANs.
+ *
+ * Which of these tests describes production: only the admin-mode ones. The installer app passes
+ * isAdminUser: true on every connection and never supplies brokerCommonName or sniHostname, so
+ * expectedBrokerCN and expectedSniHost are null in the field and neither pin runs. The CN and SAN
+ * tests below cover a configuration nothing ships today; testAdminUser_ForeignDeviceCert_Accepted_HostPinSkipped
+ * covers every real connection. Chain validation is what production actually gains here — do not
+ * read the passing host-pin tests as protection Field Pro has.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 28)
@@ -305,6 +312,29 @@ public class CustomTrustManagerTest {
         Object tm = newTrustManager(trustStoreWith(root), null, "192.168.1.5");
 
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+    }
+
+    @Test
+    public void testCertificateWithNoSANExtension_ReportsMissingExtension_NotMismatch() throws Exception {
+        // Three different failures used to collapse into "SAN does not match SNI host": a real
+        // mismatch, an unparseable extension, and no extension at all. Only the first justifies
+        // that message. ROOT_PEM is a CA with no subjectAltName, so it exercises the third case;
+        // calling the matcher directly keeps chain validation out of the way.
+        X509Certificate root = cert(ROOT_PEM);
+        Object tm = newTrustManager(trustStoreWith(root), null, "localhost");
+
+        Method matches = tm.getClass().getDeclaredMethod(
+                "certificateMatchesHost", X509Certificate.class, String.class);
+        matches.setAccessible(true);
+        try {
+            matches.invoke(tm, root, "localhost");
+            fail("A certificate with no subjectAltName extension must not be reported as a mismatch");
+        } catch (InvocationTargetException e) {
+            assertTrue("Expected CertificateException, got " + e.getCause(),
+                    e.getCause() instanceof CertificateException);
+            assertTrue("Message should name the missing extension: " + e.getCause().getMessage(),
+                    e.getCause().getMessage().contains("no subjectAltName extension"));
+        }
     }
 
     @Test(expected = CertificateException.class)
