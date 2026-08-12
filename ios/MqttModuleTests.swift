@@ -326,6 +326,24 @@ class MqttModuleTests: XCTestCase {
                      "/firmware takes precedence over /status")
     }
 
+    func testTopicCollision_NetworkBeforeConfig() {
+        let module = MqttModule()
+        // High byte (0x80) makes this non-text; classifying it as text would corrupt the bytes.
+        let protobufPayload = Data([0x0a, 0x02, 0x08, 0x80])
+
+        // Network config/state responses are protobuf but their topics contain /config,
+        // so /network/ must win over the /config text rule.
+        XCTAssertTrue(
+            module.isBinaryData(topic: "remote/network/config/post/accepted", data: protobufPayload),
+            "/network/ takes precedence over /config (binary-first)")
+        XCTAssertTrue(
+            module.isBinaryData(topic: "remote/network/state", data: protobufPayload),
+            "network state responses are binary")
+        XCTAssertTrue(
+            module.isBinaryData(topic: "remote/network/proto/config/get/accepted", data: protobufPayload),
+            "/proto/ also takes precedence over /config")
+    }
+
     // MARK: - ASCII Protobuf Edge Cases
 
     func testASCIIProtobuf_UnknownTopic_Misclassified() {

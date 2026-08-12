@@ -82,11 +82,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
         // These topics carry protobuf or firmware data and must always be binary
         if (topic != null) {
             // Protobuf topics (device lists, RMA swap, hardware assembly, etc.)
+            // `/network/` must precede the `/config` text rule below: network config/state
+            // responses are protobuf, but their topics contain `/config`.
             if (topic.contains("/proto/") ||
                 topic.contains("/device") ||
                 topic.contains("/rma") ||
                 topic.contains("/assembly") ||
-                topic.contains("/installed")) {
+                topic.contains("/installed") ||
+                topic.contains("/network/")) {
                 return true;
             }
 

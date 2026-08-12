@@ -1,6 +1,6 @@
 {
   "name": "@generacclean/react-native-mqtt-mtls",
-  "version": "1.3.1",
+  "version": "1.3.3",
   "description": "A React Native MQTT client with mTLS (mutual TLS) support",
   "main": "index.ts",
   "types": "index.d.ts",

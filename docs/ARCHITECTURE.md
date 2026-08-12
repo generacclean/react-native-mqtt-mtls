@@ -263,6 +263,7 @@ The library uses topic patterns to deterministically classify known message type
 - `/rma*` - RMA swap messages
 - `/assembly*` - Hardware assembly messages
 - `/installed*` - Installed devices messages
+- `/network/*` - Network config/state protobuf responses (matched before `/config` so these stay binary)
 - `/firmware*` - Firmware update payloads
 - `/ota*` - Over-the-air update messages
 - `/upload*` - File upload messages
@@ -272,6 +273,8 @@ The library uses topic patterns to deterministically classify known message type
 - `/config*` - Configuration JSON
 - `/command*` - Command messages
 - `/json*` - Explicit JSON messages
+
+> Binary patterns are checked before text patterns. A topic like `remote/network/config/...` contains `/config` but is protobuf, so `/network/` must be listed under binary and evaluated first.
 
 ### UTF-8 Heuristic (Fallback)
 
@@ -288,10 +291,11 @@ For topics not matching known patterns, the library attempts UTF-8 decoding:
 private boolean isBinaryData(String topic, byte[] payload) {
     // Check topic patterns first (deterministic)
     if (topic != null) {
-        if (topic.contains("/proto/") || topic.contains("/device") || ...) {
-            return true;  // Known binary topic
+        if (topic.contains("/proto/") || topic.contains("/device")
+                || topic.contains("/network/") || ...) {
+            return true;  // Known binary topic (network before /config below)
         }
-        if (topic.contains("/status") || topic.contains("/json") || ...) {
+        if (topic.contains("/status") || topic.contains("/config") || ...) {
             return false;  // Known text topic
         }
     }
@@ -312,10 +316,11 @@ private boolean isBinaryData(String topic, byte[] payload) {
 // iOS (MqttModule.swift)
 private func isBinaryData(topic: String, data: Data) -> Bool {
     // Topic-based detection
-    if topic.contains("/proto/") || topic.contains("/device") || ... {
-        return true
+    if topic.contains("/proto/") || topic.contains("/device")
+        || topic.contains("/network/") || ... {
+        return true  // network before /config below
     }
-    if topic.contains("/status") || topic.contains("/json") || ... {
+    if topic.contains("/status") || topic.contains("/config") || ... {
         return false
     }
     
