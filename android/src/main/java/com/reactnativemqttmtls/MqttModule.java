@@ -259,6 +259,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
     // ============================================================================
 
     private static class CustomTrustManager implements X509TrustManager {
+        /** id-kp-serverAuth: the certificate may authenticate a TLS server. */
+        private static final String EKU_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
+        /** anyExtendedKeyUsage: the certificate is valid for every purpose, server auth included. */
+        private static final String EKU_ANY = "2.5.29.37.0";
+
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
         private final String expectedSniHost;
@@ -311,6 +316,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
             // CN/SNI pins below.
             validateCertificateChain(chain);
             Log.d(TAG, "✓ Server certificate chain validated via CertPathValidator (PKIX)");
+
+            // Also unconditional: PKIX says the leaf is genuine, not that it is a broker.
+            requireTlsServerCertificate(serverCert);
 
             // Both pins below key off whether an expected value was configured, not off isAdminUser
             // directly: admin mode nulls them, but a non-admin caller passing an empty string loses
@@ -394,6 +402,46 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 Log.e(TAG, "Certificate chain validation failed", e);
                 throw new CertificateException("Server certificate chain validation failed: " + e.getMessage(), e);
             }
+        }
+
+        /**
+         * Rejects a leaf that declares what it is for and leaves out TLS server authentication.
+         *
+         * PKIX checks signatures, validity dates, path length, and basic constraints, but not the
+         * leaf's purpose. Every device holds a *client* certificate from the same gateway CA, so
+         * without this check one of those would pass as the broker whenever the CN and SAN pins
+         * are skipped — which is every production connection today, since the app forces admin
+         * mode. This is the check iOS gets from SecPolicyCreateSSL(true, nil).
+         *
+         * A leaf with no extendedKeyUsage extension is unrestricted and passes with a warning:
+         * that is what X509CertSelector.setExtendedKeyUsage means by "implicitly supports all key
+         * usages" and what the iOS SSL policy accepts, so tightening it here would reject brokers
+         * iOS still connects to.
+         */
+        private void requireTlsServerCertificate(X509Certificate leaf) throws CertificateException {
+            List<String> purposes;
+            try {
+                purposes = leaf.getExtendedKeyUsage();
+            } catch (CertificateParsingException e) {
+                throw new CertificateException(
+                        "Cannot parse the extendedKeyUsage extension on the broker certificate", e);
+            }
+
+            if (purposes == null) {
+                Log.w(TAG, "Broker certificate declares no extended key usage — it is not "
+                        + "restricted to TLS server authentication");
+                return;
+            }
+
+            if (purposes.contains(EKU_SERVER_AUTH) || purposes.contains(EKU_ANY)) {
+                Log.d(TAG, "✓ Broker certificate is valid for TLS server authentication");
+                return;
+            }
+
+            Log.e(TAG, "EKU MISMATCH! Certificate is not a TLS server certificate: " + purposes);
+            throw new CertificateException(
+                    "Broker certificate is not valid for TLS server authentication. "
+                            + "Extended key usage: " + purposes);
         }
 
         /**
@@ -1137,7 +1185,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
     /**
      * Directories the software keystore may legitimately live in, in preference order.
      *
-     * react-native-ecc-csr 1.3.1+ writes the keystore to getNoBackupFilesDir() so the private key is
+     * react-native-ecc-csr 1.4.0+ writes the keystore to getNoBackupFilesDir() so the private key is
      * excluded from Android Auto Backup unconditionally; earlier versions used getFilesDir(). Both
      * are app-private, so both are accepted - and filesDir has to stay accepted because a device
      * that has not yet run the ecc-csr migration still has its keystore there.

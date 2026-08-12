@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.3] - 2026-08-12
+## [1.4.0] - 2026-08-12
+
+> A minor bump rather than a patch: the public API is unchanged, but server certificates that
+> previous versions accepted are now rejected (expired, wrong-host, and non-server certificates),
+> and this version must ship together with react-native-ecc-csr 1.4.0+.
 
 ### Fixed
 
@@ -10,22 +14,23 @@ All notable changes to this project will be documented in this file.
   - **Android**: `CustomTrustManager.checkServerTrusted` validated the chain via hand-rolled per-issuer signature loops with no expiry check and no hostname/SAN matching, so a certificate validly issued by a trusted CA for one host was accepted when connecting to a different host, and expired certificates were accepted. Replaced with the platform `CertPathValidator` ("PKIX"), which enforces expiry, path-length, and basic-constraints, and added SAN matching against the expected SNI host.
   - **iOS**: `didReceive(trust:)` accepted any server certificate unconditionally in admin mode, and only did a CN string comparison otherwise — the app-provided root CA bundle was parsed but never evaluated against the presented chain. Now validates the chain via `SecTrustEvaluateWithError` against app-provided anchors unconditionally; admin mode only skips the CN pin, never chain validation.
   - On both platforms, chain validation always runs; identity pinning is skipped only when no expected value is configured (admin mode). The two platforms do not pin the same thing: Android matches the presented certificate's SANs (DNS and iPAddress) against the expected SNI host in addition to comparing CN, while iOS still only compares CN. `SecPolicyCreateSSL(true, nil)` is created without a hostname, so iOS performs no SAN check — closing that gap is tracked separately.
-  - What chain validation still does not check: revocation is off on both platforms (`params.setRevocationEnabled(false)` on Android; iOS does not opt in), because the private gateway CA publishes no CRL or OCSP responder, so a revoked broker certificate is accepted until it expires. Extended key usage is checked on iOS only — `SecPolicyCreateSSL` requires the leaf to be a TLS server certificate, while the bare Android `PKIXParameters` does not, so a *client* certificate from the same CA passes Android and fails iOS.
+  - Both platforms also require the leaf to be a TLS server certificate. iOS gets this from `SecPolicyCreateSSL(true, nil)`; Android checks `getExtendedKeyUsage()` directly, because bare `PKIXParameters` validates that a certificate is genuine, not what it is for. Without it, a device's own *client* certificate from the same CA — every device holds one — would be accepted as the broker whenever the CN and SAN pins are skipped, which is every production connection today. A leaf that asserts no extended key usage at all is unrestricted and still accepted, on both platforms.
+  - What chain validation still does not check: revocation is off on both platforms (`params.setRevocationEnabled(false)` on Android; iOS does not opt in), because the private gateway CA publishes no CRL or OCSP responder, so a revoked broker certificate is accepted until it expires.
   - Residual risk, accepted: the installer app passes `isAdminUser: true` on every connection, so `expectedBrokerCN` and `expectedSniHost` are null in production and neither the CN nor the SAN pin runs today. What this release buys in production is chain validation — expiry, path length, basic constraints, and a signature chain to an app-provided anchor — which previously did not run at all on iOS. Any certificate issued by the trusted CA is still accepted for any host until the app stops forcing admin mode.
 
-- **Handle absolute keystore paths from ecc-csr 1.3.1+ (Issue #21)**
+- **Handle absolute keystore paths from ecc-csr 1.4.0+ (Issue #21)**
   - `loadSoftwareKeyStore()` now uses `File.isAbsolute()` to distinguish absolute paths (used directly) from relative paths (resolved against `filesDir`)
   - Fixes path doubling bug where absolute paths like `/data/user/0/com.app/files/software_keys.p12` were incorrectly prepended with `filesDir`, resulting in `/data/user/0/com.app/files/data/user/0/com.app/files/software_keys.p12`
   - Backward compatible: relative paths, null, and empty defaults behave unchanged
-  - Related: react-native-ecc-csr 1.3.1 now returns explicit keystore descriptors with absolute paths
+  - Related: react-native-ecc-csr 1.4.0 now returns explicit keystore descriptors with absolute paths
   - Resolved keystore paths (absolute or relative) are now checked to remain inside app-private storage before being opened
 
-- **Load the keystore from `getNoBackupFilesDir()` (ecc-csr 1.3.1+)**
-  - react-native-ecc-csr 1.3.1 moved the software keystore from `getFilesDir()` to `getNoBackupFilesDir()` so the private key is excluded from Android Auto Backup unconditionally, instead of depending on the consuming app's `fullBackupContent`/`dataExtractionRules` configuration
+- **Load the keystore from `getNoBackupFilesDir()` (ecc-csr 1.4.0+)**
+  - react-native-ecc-csr 1.4.0 moved the software keystore from `getFilesDir()` to `getNoBackupFilesDir()` so the private key is excluded from Android Auto Backup unconditionally, instead of depending on the consuming app's `fullBackupContent`/`dataExtractionRules` configuration
   - `loadSoftwareKeyStore()` now resolves relative/default paths against `getNoBackupFilesDir()` first and falls back to `getFilesDir()`, so devices that have not yet run the ecc-csr migration keep working
   - An absolute path that no longer exists is retried by filename under both directories. The installer persists `keystorePath` across launches, so immediately after upgrading it supplies a `files/` path for a keystore ecc-csr has already moved; without this fallback the first post-upgrade connect would fail
   - The app-private containment check now accepts either directory, and is applied after resolution so neither a caller-supplied path nor the fallback can escape via `..`
-  - Requires ecc-csr 1.3.1+ to be shipped together with this version
+  - Requires ecc-csr 1.4.0+ to be shipped together with this version
 
 ## [1.3.2] - 2026-08-05
 

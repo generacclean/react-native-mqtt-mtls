@@ -24,13 +24,16 @@ import static org.junit.Assert.*;
  * Verifies:
  * - Chain validation goes through CertPathValidator (PKIX), enforcing expiry, path-length,
  *   basic-constraints, and signature checks.
+ * - The leaf is a TLS server certificate: a clientAuth-only certificate from the same CA is
+ *   rejected even in admin mode, where neither identity pin runs.
  * - Hostname/SAN matching against the expected SNI host is enforced when configured.
  * - isAdminUser semantics: chain validation always runs; CN and hostname/SAN pinning
  *   are skipped only when expectedBrokerCN / expectedSniHost are null (admin mode).
  *
  * Fixtures are a real EC P-384 chain generated with openssl: Penguin TEST Root ->
  * Intermediate -> broker leaf (800-day validity, SANs localhost/127.0.0.1/10.0.2.2),
- * plus an expired leaf and a leaf issued for a different host's SANs.
+ * plus an expired leaf and a leaf issued for a different host's SANs. A second CA with a
+ * clientAuth-only leaf and a leaf with no extendedKeyUsage extension covers the EKU check.
  *
  * Which of these tests describes production: only the admin-mode ones. The installer app passes
  * isAdminUser: true on every connection and never supplies brokerCommonName or sniHostname, so
@@ -130,6 +133,55 @@ public class CustomTrustManagerTest {
             + "A1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwMDaAAwZQIwP23nCIpCQtd1uojnc8d0\n"
             + "CCqypzEvMnp/D9eQ0GZ9i2JQZEYqUIdyp7zXqX4/ZvLjAjEAsjSyr7JPLfeHJXCC\n"
             + "Znze5rLgp0+w2CD/Sqd7gFKiJHkllxIQA7xZD1fmzZ8Q7A02\n"
+            + "-----END CERTIFICATE-----\n";
+
+    // A second self-signed CA, standing in for the gateway CA that issues both broker and device
+    // certificates. The two leaves below chain to it and differ only in extendedKeyUsage, so the
+    // EKU tests turn on that extension alone. It is separate from ROOT_PEM only because the
+    // private keys of that chain were not kept, so nothing new can be issued under it.
+    private static final String DEVICE_CA_PEM = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIB5DCCAWqgAwIBAgIUSaSgNMtMfU7BLfGgjGsEGxRX55swCgYIKoZIzj0EAwMw\n"
+            + "ITEfMB0GA1UEAwwWUGVuZ3VpbiBURVNUIERldmljZSBDQTAeFw0yNjA4MTIxODA0\n"
+            + "MTRaFw0zNjA4MDkxODA0MTRaMCExHzAdBgNVBAMMFlBlbmd1aW4gVEVTVCBEZXZp\n"
+            + "Y2UgQ0EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQakjihhfkV4zxS5jBKizCO/1xI\n"
+            + "cuikY8sqaNkSsMylVzy8nd+8uaobuFvuFZCHRS7bLhiQyu4uQTt0jEUEVlB9Aqb3\n"
+            + "un7V3E61+JcSXURH7RxXieJybJ60M0wA6TX44JGjYzBhMB0GA1UdDgQWBBRdOviK\n"
+            + "hKMdbTKUZg6lTbIXWwku7zAfBgNVHSMEGDAWgBRdOviKhKMdbTKUZg6lTbIXWwku\n"
+            + "7zAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAwNo\n"
+            + "ADBlAjB0YIhy54oo/WpQMgHCTDvdxUMO1NUWCQjo1HvaLit63u21zIJWLLMD1AtY\n"
+            + "yu4SO/wCMQCRvspXagNjZBp5NiE52QJectOeeImfvi/aWw95wcwzR+0RrdTt0dhr\n"
+            + "An+/A6IzwbQ=\n"
+            + "-----END CERTIFICATE-----\n";
+
+    // Client certificate of the kind every device already holds: same CA, same CN and SANs as the
+    // broker, extendedKeyUsage = clientAuth only.
+    private static final String CLIENT_AUTH_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
+            + "MIICAjCCAYigAwIBAgIBETAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
+            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjE4MDQxNFoXDTI4MTAyMDE4MDQxNFow\n"
+            + "HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr\n"
+            + "gQQAIgNiAAQIp4q3tGLaGJ1/uLWIVlxhlo35ZBw00gB+cNHVudPPqucXmMsj31VZ\n"
+            + "6F7F+hvZA8gmMsz1IyfqHc0DYKVhh01sVOEMHDa0nCjdD13N5SOsHkanck1Gqnvd\n"
+            + "pmZPvPyZcdWjgZUwgZIwDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCB4AwEwYDVR0l\n"
+            + "BAwwCgYIKwYBBQUHAwIwIAYDVR0RBBkwF4IJbG9jYWxob3N0hwR/AAABhwQKAAIC\n"
+            + "MB0GA1UdDgQWBBTCLwjxlpjUimo0Cp7L+baRRz+cTTAfBgNVHSMEGDAWgBRdOviK\n"
+            + "hKMdbTKUZg6lTbIXWwku7zAKBggqhkjOPQQDAwNoADBlAjAD1IsbbH4wcov/HLqV\n"
+            + "PUQ7gvWFR705uz2fNaFn/wnzFCYufKnm07LBMKbbFEG9htICMQDxd/aH4smZ0Q9y\n"
+            + "qgVNU6jlp9xkBy6xKMjilfqiVZo6+YdtEqnfnD91mL1j/xOoRng=\n"
+            + "-----END CERTIFICATE-----\n";
+
+    // Same CA and SANs, no extendedKeyUsage extension at all: unrestricted, so accepted.
+    private static final String NO_EKU_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIB6zCCAXGgAwIBAgIBEjAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
+            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjE4MDQxNFoXDTI4MTAyMDE4MDQxNFow\n"
+            + "HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr\n"
+            + "gQQAIgNiAAS5HANlVmZRi5rOe5y+7MfWAl5pi8FgiL2r3a0btQrtgcl8YOQCTxWv\n"
+            + "QHgg0T4FRmbymAw96uXPWvaYUWty4Ub7UJL5Kj2mXOU5RQlcXx7sY0qnEYTNFsl5\n"
+            + "AE+hl0LSbiujfzB9MAwGA1UdEwEB/wQCMAAwCwYDVR0PBAQDAgWgMCAGA1UdEQQZ\n"
+            + "MBeCCWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQUfGoq70Fuzs60e5RI\n"
+            + "K7ssjQyRflIwHwYDVR0jBBgwFoAUXTr4ioSjHW0ylGYOpU2yF1sJLu8wCgYIKoZI\n"
+            + "zj0EAwMDaAAwZQIxANCgsyc2G1klHRRu2aimQkDyJQRI0IsdnRoDNNqqb+1h9Brr\n"
+            + "qizl5buVvB4joASefAIwQ5OwQlHuexmbgxu4FJgAk69KIeOS5rZQIWiFzBQ0vSO+\n"
+            + "+TQHM1BITlZk4PHP7+II\n"
             + "-----END CERTIFICATE-----\n";
 
     private static X509Certificate cert(String pem) throws Exception {
@@ -247,6 +299,58 @@ public class CustomTrustManagerTest {
             assertTrue("Expected the no-leaf-certificate guard, got: " + e.getMessage(),
                     e.getMessage().contains("no leaf certificate"));
         }
+    }
+
+    // ========================================================================
+    // Extended key usage — the leaf must be a TLS server certificate.
+    // Runs unconditionally, like chain validation, not as an identity pin.
+    // ========================================================================
+
+    @Test
+    public void testClientCertificateFromSameCA_Rejected() throws Exception {
+        // The attack PKIX alone does not stop: a device's own client certificate, validly issued by
+        // the trusted CA with the broker's CN and SANs, presented as the broker. Admin mode (both
+        // pins null) is what production runs, so the EKU check is the only thing standing here.
+        X509Certificate ca = cert(DEVICE_CA_PEM);
+        X509Certificate clientLeaf = cert(CLIENT_AUTH_LEAF_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(ca), null, null);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { clientLeaf });
+            fail("A clientAuth-only certificate must not be accepted as the broker");
+        } catch (CertificateException e) {
+            assertTrue("Message should name TLS server authentication: " + e.getMessage(),
+                    e.getMessage().contains("not valid for TLS server authentication"));
+        }
+    }
+
+    @Test
+    public void testServerCertificateWithNoEKUExtension_Accepted() throws Exception {
+        // A leaf with no extendedKeyUsage extension is unrestricted. iOS accepts it too, so
+        // rejecting it here would break brokers that still connect on iOS. Pinned deliberately:
+        // tightening this is a behaviour change, not a bug fix.
+        X509Certificate ca = cert(DEVICE_CA_PEM);
+        X509Certificate noEkuLeaf = cert(NO_EKU_LEAF_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(ca), null, null);
+
+        checkServerTrusted(tm, new X509Certificate[] { noEkuLeaf });
+    }
+
+    @Test
+    public void testBrokerCertificateWithServerAuthEKU_Accepted() throws Exception {
+        // Companion to the rejection above: the broker fixture carries serverAuth, so the new
+        // check passes it. Without this case, deleting the check would still leave a green suite
+        // for every other reason a valid chain is accepted.
+        X509Certificate ca = cert(DEVICE_CA_PEM);
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(root, ca), null, null);
+
+        checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
     }
 
     // ========================================================================

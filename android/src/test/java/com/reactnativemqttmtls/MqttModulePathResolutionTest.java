@@ -23,7 +23,7 @@ import static org.mockito.Mockito.*;
 
 /**
  * Regression tests for keystore path resolution (Issue #21) and for the
- * no-backup storage move in react-native-ecc-csr 1.3.2+.
+ * no-backup storage move in react-native-ecc-csr 1.4.0+.
  *
  * loadSoftwareKeyStore() throws a KeyException containing the resolved
  * absolute path before any Android-crypto call, so asserting on that

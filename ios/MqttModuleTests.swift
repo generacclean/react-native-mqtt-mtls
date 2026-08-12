@@ -272,13 +272,13 @@ class MqttModuleTests: XCTestCase {
     }
 
     func testCallbackGuard_NilCallbackHandling() {
+        // There is nothing observable to assert on a nil callback: the guard's only job here is to
+        // not unwrap it. The failure mode is a trap, which fails the test on its own, so this case
+        // carries no assertion rather than a vacuous one that would pass even if invoke() started
+        // force-unwrapping.
         let guardObj = CallbackGuard(nil)
 
-        // Should not crash with nil callback
         guardObj.invoke(["result"])
-
-        // Test passes if no crash occurs
-        XCTAssertTrue(true, "Should handle nil callback gracefully")
     }
 
     func testCallbackGuard_ThreadSafety() {
