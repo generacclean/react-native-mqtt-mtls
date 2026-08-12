@@ -381,6 +381,46 @@ public class CustomTrustManagerTest {
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
     }
 
+    // ========================================================================
+    // RFC 2253 DN parsing behind the CN pin
+    // ========================================================================
+
+    /** Invokes the static package-private CN parser on CustomTrustManager. */
+    private static String cnFromDn(String dn) throws Exception {
+        Class<?> clazz = Class.forName("com.reactnativemqttmtls.MqttModule$CustomTrustManager");
+        Method method = clazz.getDeclaredMethod("cnFromDn", String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(null, dn);
+    }
+
+    @Test
+    public void testCnFromDn_EscapedCommaInValue_NotTruncated() throws Exception {
+        // dn.split(",") returns "CN=Acme\" here, which would fail the CN pin against the real
+        // subject. RFC 2253 escapes a comma inside a value, so only unescaped commas separate RDNs.
+        assertEquals("Acme, Inc", cnFromDn("CN=Acme\\, Inc,O=Acme,C=US"));
+    }
+
+    @Test
+    public void testCnFromDn_PlainValueAndOrdering() throws Exception {
+        assertEquals("penguin-broker.local", cnFromDn("CN=penguin-broker.local"));
+        assertEquals("penguin-broker.local", cnFromDn("O=Generac,CN=penguin-broker.local,C=US"));
+        // An O value that merely contains "CN=" must not be mistaken for the CN attribute.
+        assertEquals("real", cnFromDn("O=not a CN=decoy,CN=real"));
+    }
+
+    @Test
+    public void testCnFromDn_NoCNAttribute_ReturnsNull() throws Exception {
+        assertNull(cnFromDn("O=Generac,C=US"));
+        assertNull(cnFromDn(null));
+    }
+
+    @Test
+    public void testExtractCN_MatchesFixtureSubject() throws Exception {
+        // Guards the parser against the real fixture, not just synthetic strings.
+        assertEquals("penguin-broker.local", cnFromDn(
+                cert(BROKER_PEM).getSubjectX500Principal().getName()));
+    }
+
     @Test(expected = CertificateException.class)
     public void testMismatchedCN_NonAdmin_Rejected() throws Exception {
         X509Certificate root = cert(ROOT_PEM);

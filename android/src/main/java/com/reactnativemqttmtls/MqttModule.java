@@ -436,17 +436,74 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         private String extractCN(X509Certificate cert) {
             try {
-                String dn = cert.getSubjectX500Principal().getName();
-                for (String part : dn.split(",")) {
-                    String trimmed = part.trim();
-                    if (trimmed.startsWith("CN=")) {
-                        return trimmed.substring(3);
-                    }
-                }
+                return cnFromDn(cert.getSubjectX500Principal().getName());
             } catch (Exception e) {
                 Log.e(TAG, "Failed to extract CN from certificate", e);
+                return null;
+            }
+        }
+
+        /**
+         * Reads the CN attribute out of an RFC 2253 distinguished name.
+         *
+         * A plain {@code dn.split(",")} is wrong here: RFC 2253 escapes a comma inside an attribute
+         * value as {@code \,}, so {@code CN=Acme\, Inc,O=Acme} splits into two RDNs and the CN comes
+         * back truncated to {@code Acme\}. Since this value is compared against the expected broker
+         * CN, a truncated read is a failed pin rather than a cosmetic bug. Splitting on unescaped
+         * commas only, then unescaping the value, handles it. javax.naming.ldap.LdapName would do
+         * this properly but is not available on Android.
+         */
+        static String cnFromDn(String dn) {
+            if (dn == null) {
+                return null;
+            }
+            for (String rdn : splitOnUnescapedCommas(dn)) {
+                String trimmed = rdn.trim();
+                // Attribute types are case-insensitive per RFC 4519.
+                if (trimmed.regionMatches(true, 0, "CN=", 0, 3)) {
+                    return unescapeDnValue(trimmed.substring(3));
+                }
             }
             return null;
+        }
+
+        private static List<String> splitOnUnescapedCommas(String dn) {
+            List<String> parts = new ArrayList<>();
+            StringBuilder current = new StringBuilder();
+            boolean escaped = false;
+            for (int i = 0; i < dn.length(); i++) {
+                char c = dn.charAt(i);
+                if (escaped) {
+                    current.append(c);
+                    escaped = false;
+                } else if (c == '\\') {
+                    current.append(c);
+                    escaped = true;
+                } else if (c == ',') {
+                    parts.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
+            }
+            parts.add(current.toString());
+            return parts;
+        }
+
+        /** Drops the backslashes RFC 2253 uses to escape special characters within a value. */
+        private static String unescapeDnValue(String value) {
+            StringBuilder unescaped = new StringBuilder(value.length());
+            boolean escaped = false;
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (!escaped && c == '\\') {
+                    escaped = true;
+                } else {
+                    unescaped.append(c);
+                    escaped = false;
+                }
+            }
+            return unescaped.toString();
         }
 
         @Override
