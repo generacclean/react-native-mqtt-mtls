@@ -312,7 +312,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
             validateCertificateChain(chain);
             Log.d(TAG, "✓ Server certificate chain validated via CertPathValidator (PKIX)");
 
-            // CN validation only for non-admin users (expectedBrokerCN will be null for admin)
+            // Both pins below key off whether an expected value was configured, not off isAdminUser
+            // directly: admin mode nulls them, but a non-admin caller passing an empty string loses
+            // the pin the same way. The skip logs say which value was missing so a support engineer
+            // reading a device log is not told "admin" for a configuration bug.
             if (expectedBrokerCN != null && !expectedBrokerCN.isEmpty()) {
                 String brokerCN = extractCN(serverCert);
                 Log.d(TAG, "Broker certificate CN: " + brokerCN);
@@ -323,9 +326,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             "Broker CN mismatch. Expected: " + expectedBrokerCN + ", Got: " + brokerCN);
                 }
                 Log.d(TAG, "✓ Broker CN validated: " + brokerCN);
+            } else {
+                Log.w(TAG, "No expected broker CN configured — CN pin skipped");
             }
 
-            // SNI host/SAN validation only for non-admin users (expectedSniHost will be null for admin)
             if (expectedSniHost != null && !expectedSniHost.isEmpty()) {
                 if (!certificateMatchesHost(serverCert, expectedSniHost)) {
                     Log.e(TAG, "SAN MISMATCH! No SAN entry on server certificate matches SNI host: " + expectedSniHost);
@@ -333,6 +337,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             "Broker certificate SAN does not match SNI host: " + expectedSniHost);
                 }
                 Log.d(TAG, "✓ Broker certificate SAN matched SNI host: " + expectedSniHost);
+            } else {
+                Log.w(TAG, "No expected SNI host configured — SAN pin skipped");
             }
         }
 
