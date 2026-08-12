@@ -1,0 +1,14 @@
+# Backstop only. The real control is the "files" allowlist in package.json, which names specific
+# paths rather than whole platform directories — an entry like "android/" pulls in Gradle output,
+# and .npmignore does NOT override the allowlist (1.3.1-beta.5 shipped 824 build artifacts that
+# way). Keep this in sync if that list is ever broadened.
+android/build/
+android/.gradle/
+android/.cxx/
+ios/build/
+
+# Test scaffolding is not part of the consumed package.
+android/src/test/
+ios/TrustValidationTests/
+ios/**/*Tests.swift
+__tests__/

@@ -741,65 +741,6 @@ class MqttModule: RCTEventEmitter {
         return certificates
     }
     
-    // ============================================================================
-    // CN EXTRACTION
-    // ============================================================================
-    
-    private func extractCommonName(from certificate: SecCertificate) -> String? {
-        os_log("              → extractCommonName()", log: logger, type: .info)
-        
-        if let cn = extractCNFromSubjectSummary(certificate) {
-            return cn
-        }
-        
-        os_log("              - Trying deprecated API...", log: logger, type: .info)
-        var commonName: CFString?
-        let status = SecCertificateCopyCommonName(certificate, &commonName)
-        
-        if status == errSecSuccess, let cn = commonName as String? {
-            os_log("              ✓ CN via deprecated API: %{public}@", log: logger, type: .info, cn)
-            return cn
-        }
-        
-        os_log("              ✗ Failed to extract CN", log: logger, type: .error)
-        return nil
-    }
-    
-    private func extractCNFromSubjectSummary(_ certificate: SecCertificate) -> String? {
-        guard let summary = SecCertificateCopySubjectSummary(certificate) as String? else {
-            return nil
-        }
-        
-        os_log("              - Certificate summary: %{public}@", log: logger, type: .info, summary)
-        
-        if !summary.contains("=") && !summary.contains(",") {
-            os_log("              ✓ CN (simple): %{public}@", log: logger, type: .info, summary)
-            return summary
-        }
-        
-        let components = summary.components(separatedBy: ",")
-        for component in components {
-            let trimmed = component.trimmingCharacters(in: .whitespaces)
-            
-            if trimmed.lowercased().hasPrefix("cn=") {
-                let cn = String(trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces))
-                os_log("              ✓ CN (parsed): %{public}@", log: logger, type: .info, cn)
-                return cn
-            }
-        }
-        
-        let slashComponents = summary.components(separatedBy: "/")
-        for component in slashComponents {
-            let trimmed = component.trimmingCharacters(in: .whitespaces)
-            if trimmed.lowercased().hasPrefix("cn=") {
-                let cn = String(trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces))
-                os_log("              ✓ CN (slash-parsed): %{public}@", log: logger, type: .info, cn)
-                return cn
-            }
-        }
-        
-        return nil
-    }
 }
 
 // ============================================================================
@@ -861,77 +802,10 @@ extension MqttModule: CocoaMQTTDelegate {
         completionHandler(trusted)
     }
 
-    /// Validates a server's TLS trust object: chain validation against app-provided anchors is
-    /// always required; CN pinning against `expectedCN` is skipped only when `expectedCN` is nil/empty
-    /// (admin users, who talk to many brokers and have no single CN to pin against).
-    ///
-    /// - Parameters:
-    ///   - trust: The `SecTrust` object presented by the TLS handshake.
-    ///   - expectedCN: The known device CN to pin against, or nil/empty to skip CN pinning.
-    ///   - anchors: The app-provided root CA certificate(s) to validate the chain against.
-    /// - Returns: true if the server should be trusted.
+    /// Validates a server's TLS trust object. The logic lives in `TrustValidator` so it can be
+    /// unit-tested without React Native or CocoaMQTT; see `ios/TrustValidation/TrustValidator.swift`.
     internal func evaluateServerTrust(_ trust: SecTrust, expectedCN: String?, anchors: [SecCertificate]) -> Bool {
-        // STEP 1: Validate the server's certificate chain against our app-provided root CA(s).
-        // This runs unconditionally, admin or not — isAdminUser only ever skips the CN pin below.
-        // Policy uses no built-in hostname check (nil host): CN pinning below is our hostname-equivalent
-        // control, and it must remain skippable for admin users who talk to many brokers.
-        guard !anchors.isEmpty else {
-            os_log("  ✗ No trusted root CA certificates configured — rejecting", log: logger, type: .error)
-            return false
-        }
-
-        let policy = SecPolicyCreateSSL(true, nil)
-        _ = SecTrustSetPolicies(trust, policy)
-        _ = SecTrustSetAnchorCertificates(trust, anchors as CFArray)
-        _ = SecTrustSetAnchorCertificatesOnly(trust, true)  // exclude system roots — only our anchors are trusted
-
-        var trustError: CFError?
-        let chainIsTrusted = SecTrustEvaluateWithError(trust, &trustError)
-
-        if !chainIsTrusted {
-            os_log("  ✗ Certificate chain validation FAILED: %{public}@", log: logger, type: .error,
-                   (trustError as Error?)?.localizedDescription ?? "unknown error")
-            return false
-        }
-        os_log("  ✓ Certificate chain validated against app-provided anchor(s)", log: logger, type: .info)
-
-        // STEP 2: CN pinning — skipped for admin users (no expected CN configured)
-        guard let cn = expectedCN, !cn.isEmpty else {
-            os_log("  - No expected CN configured (admin user) — skipping CN pin", log: logger, type: .info)
-            return true
-        }
-
-        guard let serverCert = Self.leafCertificate(from: trust) else {
-            os_log("  ✗ Cannot retrieve server certificate", log: logger, type: .error)
-            return false
-        }
-
-        guard let actualCN = extractCommonName(from: serverCert) else {
-            os_log("  ✗ Cannot extract CN from server certificate", log: logger, type: .error)
-            return false
-        }
-
-        if actualCN != cn {
-            os_log("  ✗ CN MISMATCH! Expected: %{public}@, Actual: %{public}@", log: logger, type: .error, cn, actualCN)
-            return false
-        }
-        os_log("  ✓ CN matches: %{public}@", log: logger, type: .info, actualCN)
-        return true
-    }
-
-    /// Retrieves the leaf certificate from an evaluated trust object.
-    /// `SecTrustGetCertificateAtIndex` is deprecated as of iOS 15 in favor of
-    /// `SecTrustCopyCertificateChain`; this keeps the iOS 12 minimum deployment target
-    /// (per the podspec) working while preferring the modern API where available.
-    private static func leafCertificate(from trust: SecTrust) -> SecCertificate? {
-        if #available(iOS 15.0, *) {
-            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
-                return nil
-            }
-            return chain.first
-        } else {
-            return SecTrustGetCertificateAtIndex(trust, 0)
-        }
+        return TrustValidator.evaluate(trust: trust, expectedCN: expectedCN, anchors: anchors, log: logger)
     }
 
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {

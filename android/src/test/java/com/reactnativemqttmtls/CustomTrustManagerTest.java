@@ -215,10 +215,31 @@ public class CustomTrustManagerTest {
 
     @Test(expected = CertificateException.class)
     public void testEmptyChain_Rejected() throws Exception {
+        // Hits the chain == null || chain.length == 0 guard at the top of checkServerTrusted,
+        // before validateCertificateChain is reached. See testChainOfOnlyAnchor_Rejected for the
+        // separate empty-path guard inside the validator.
         X509Certificate root = cert(ROOT_PEM);
         Object tm = newTrustManager(trustStoreWith(root), null, null);
 
         checkServerTrusted(tm, new X509Certificate[0]);
+    }
+
+    @Test
+    public void testChainOfOnlyAnchor_Rejected() throws Exception {
+        // A server presenting nothing but our own trust anchor leaves no leaf to validate: PKIX
+        // needs the path to stop just below the anchor, so stripping the anchor empties the path.
+        // Asserting on the message proves this reaches the validator's own guard rather than the
+        // length check at the top of checkServerTrusted.
+        X509Certificate root = cert(ROOT_PEM);
+        Object tm = newTrustManager(trustStoreWith(root), null, null);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { root });
+            fail("A chain containing only the trust anchor must be rejected");
+        } catch (CertificateException e) {
+            assertTrue("Expected the no-leaf-certificate guard, got: " + e.getMessage(),
+                    e.getMessage().contains("no leaf certificate"));
+        }
     }
 
     // ========================================================================

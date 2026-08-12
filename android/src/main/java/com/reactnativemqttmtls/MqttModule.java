@@ -1108,19 +1108,22 @@ public class MqttModule extends ReactContextBaseJavaModule {
      *   moved to no_backup/; without this retry the first post-upgrade connect fails.
      * - Relative path or default: resolved against each root in order.
      *
+     * @param roots the keystore roots to resolve against; the caller passes the same list to
+     *              {@link #isInsideKeystoreRoot(File, List)} so resolution and containment cannot
+     *              disagree about which directories are legitimate
      * @return the first candidate that exists, or the preferred candidate when none do, so the
      *         caller's not-found error names the location the keystore is supposed to be in
      */
-    private File resolveKeystoreFile(String filename) {
+    private File resolveKeystoreFile(String filename, List<File> roots) {
         List<File> candidates = new ArrayList<>();
         File supplied = new File(filename);
         if (supplied.isAbsolute()) {
             candidates.add(supplied);
-            for (File root : keystoreRoots()) {
+            for (File root : roots) {
                 candidates.add(new File(root, supplied.getName()));
             }
         } else {
-            for (File root : keystoreRoots()) {
+            for (File root : roots) {
                 candidates.add(new File(root, filename));
             }
         }
@@ -1137,10 +1140,15 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
     /**
      * Whether the resolved keystore path sits inside one of the app-private keystore roots.
+     *
+     * @param roots must be the same list used to resolve {@code keystoreFile}. getNoBackupFilesDir()
+     *              can in principle return null, and re-deriving the roots here would let a path
+     *              resolved into no_backup/ be rejected by a containment check that no longer knows
+     *              about that directory.
      */
-    private boolean isInsideKeystoreRoot(File keystoreFile) throws IOException {
+    private boolean isInsideKeystoreRoot(File keystoreFile, List<File> roots) throws IOException {
         String canonicalKeystorePath = keystoreFile.getCanonicalPath();
-        for (File root : keystoreRoots()) {
+        for (File root : roots) {
             if (canonicalKeystorePath.startsWith(root.getCanonicalPath() + File.separator)) {
                 return true;
             }
@@ -1170,12 +1178,16 @@ public class MqttModule extends ReactContextBaseJavaModule {
         String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
         String password = (keystorePassword != null) ? keystorePassword : "";
 
-        File keystoreFile = resolveKeystoreFile(filename);
+        // Resolved once and shared: resolution and the containment check below must agree on which
+        // directories count as app-private, and getNoBackupFilesDir() is not guaranteed to return
+        // the same value on two separate calls.
+        List<File> roots = keystoreRoots();
+        File keystoreFile = resolveKeystoreFile(filename, roots);
 
         // Containment check: the resolved path must stay within app-private storage, even for
         // absolute paths supplied across the RN bridge. Checked after resolution so neither the
         // caller-supplied path nor the no-backup fallback can escape via "..".
-        if (!isInsideKeystoreRoot(keystoreFile)) {
+        if (!isInsideKeystoreRoot(keystoreFile, roots)) {
             throw new KeyException("Keystore path must be inside app-private storage: " + keystoreFile.getCanonicalPath());
         }
 
@@ -1218,7 +1230,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
         keyStore = tryLoadPlainKeyStore(keystoreFile, password);
         if (keyStore != null) {
             Log.d(TAG, "Loaded plain PKCS12 keystore successfully (legacy format)");
-            Log.w(TAG, "Consider updating CSR module to use encrypted keystore format");
+            // States what is true of this device rather than asking the reader to act: this line
+            // lands in a field installer's device log, and only an app developer can change which
+            // format react-native-ecc-csr writes. Phrase it as a finding they can grep for.
+            Log.w(TAG, "Keystore is plain PKCS12, not EncryptedFile — the private key is protected "
+                + "only by app-private storage, without Android Keystore-backed file encryption");
             return keyStore;
         }
 

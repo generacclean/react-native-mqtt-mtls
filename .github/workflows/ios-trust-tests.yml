@@ -1,0 +1,23 @@
+name: iOS Trust Validation Tests
+
+# Covers the iOS server-certificate trust path (ios/TrustValidation). That code is kept free of
+# React Native and CocoaMQTT so SwiftPM can build it without a host app; the rest of MqttModule
+# still needs an Xcode target and is not built here.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Run TrustValidator unit tests
+        run: swift test

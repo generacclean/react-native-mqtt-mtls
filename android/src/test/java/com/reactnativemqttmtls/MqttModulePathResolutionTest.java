@@ -16,6 +16,7 @@ import java.io.File;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.security.KeyException;
+import java.util.List;
 
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
@@ -48,6 +49,7 @@ public class MqttModulePathResolutionTest {
     private MqttModule mqttModule;
     private Method loadSoftwareKeyStoreMethod;
     private Method resolveKeystoreFileMethod;
+    private Method keystoreRootsMethod;
 
     @Before
     public void setUp() throws Exception {
@@ -64,8 +66,11 @@ public class MqttModulePathResolutionTest {
         loadSoftwareKeyStoreMethod.setAccessible(true);
 
         resolveKeystoreFileMethod = MqttModule.class.getDeclaredMethod(
-            "resolveKeystoreFile", String.class);
+            "resolveKeystoreFile", String.class, List.class);
         resolveKeystoreFileMethod.setAccessible(true);
+
+        keystoreRootsMethod = MqttModule.class.getDeclaredMethod("keystoreRoots");
+        keystoreRootsMethod.setAccessible(true);
     }
 
     /**
@@ -84,8 +89,10 @@ public class MqttModulePathResolutionTest {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private File resolve(String keystorePath) throws Exception {
-        return (File) resolveKeystoreFileMethod.invoke(mqttModule, keystorePath);
+        List<File> roots = (List<File>) keystoreRootsMethod.invoke(mqttModule);
+        return (File) resolveKeystoreFileMethod.invoke(mqttModule, keystorePath, roots);
     }
 
     @Test

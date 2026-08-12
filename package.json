@@ -55,8 +55,15 @@
     "typescript": "^5.6.0"
   },
   "files": [
-    "android/",
-    "ios/",
+    "android/build.gradle",
+    "android/settings.gradle",
+    "android/gradle.properties",
+    "android/proguard-rules.pro",
+    "android/src/main/",
+    "ios/MqttModule.swift",
+    "ios/MqttModule.m",
+    "ios/TrustValidation/",
+    "ios/react-native-mqtt-mtls-Bridging-Header.h",
     "src/",
     "index.ts",
     "index.d.ts",
