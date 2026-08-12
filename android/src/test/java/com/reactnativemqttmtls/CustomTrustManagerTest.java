@@ -25,15 +25,17 @@ import static org.junit.Assert.*;
  * - Chain validation goes through CertPathValidator (PKIX), enforcing expiry, path-length,
  *   basic-constraints, and signature checks.
  * - The leaf is a TLS server certificate: a clientAuth-only certificate from the same CA is
- *   rejected even in admin mode, where neither identity pin runs.
+ *   rejected even in admin mode, where neither identity pin runs, and so are the two leaves
+ *   Apple's SSL policy also refuses — no extendedKeyUsage at all, and anyExtendedKeyUsage.
  * - Hostname/SAN matching against the expected SNI host is enforced when configured.
  * - isAdminUser semantics: chain validation always runs; CN and hostname/SAN pinning
  *   are skipped only when expectedBrokerCN / expectedSniHost are null (admin mode).
  *
  * Fixtures are a real EC P-384 chain generated with openssl: Penguin TEST Root ->
  * Intermediate -> broker leaf (800-day validity, SANs localhost/127.0.0.1/10.0.2.2),
- * plus an expired leaf and a leaf issued for a different host's SANs. A second CA with a
- * clientAuth-only leaf and a leaf with no extendedKeyUsage extension covers the EKU check.
+ * plus an expired leaf and a leaf issued for a different host's SANs. A second CA with three
+ * leaves that differ only in extendedKeyUsage — clientAuth, none, and anyExtendedKeyUsage —
+ * covers the EKU check.
  *
  * Which of these tests describes production: only the admin-mode ones. The installer app passes
  * isAdminUser: true on every connection and never supplies brokerCommonName or sniHostname, so
@@ -136,52 +138,69 @@ public class CustomTrustManagerTest {
             + "-----END CERTIFICATE-----\n";
 
     // A second self-signed CA, standing in for the gateway CA that issues both broker and device
-    // certificates. The two leaves below chain to it and differ only in extendedKeyUsage, so the
+    // certificates. The three leaves below chain to it and differ only in extendedKeyUsage, so the
     // EKU tests turn on that extension alone. It is separate from ROOT_PEM only because the
     // private keys of that chain were not kept, so nothing new can be issued under it.
     private static final String DEVICE_CA_PEM = "-----BEGIN CERTIFICATE-----\n"
-            + "MIIB5DCCAWqgAwIBAgIUSaSgNMtMfU7BLfGgjGsEGxRX55swCgYIKoZIzj0EAwMw\n"
-            + "ITEfMB0GA1UEAwwWUGVuZ3VpbiBURVNUIERldmljZSBDQTAeFw0yNjA4MTIxODA0\n"
-            + "MTRaFw0zNjA4MDkxODA0MTRaMCExHzAdBgNVBAMMFlBlbmd1aW4gVEVTVCBEZXZp\n"
-            + "Y2UgQ0EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQakjihhfkV4zxS5jBKizCO/1xI\n"
-            + "cuikY8sqaNkSsMylVzy8nd+8uaobuFvuFZCHRS7bLhiQyu4uQTt0jEUEVlB9Aqb3\n"
-            + "un7V3E61+JcSXURH7RxXieJybJ60M0wA6TX44JGjYzBhMB0GA1UdDgQWBBRdOviK\n"
-            + "hKMdbTKUZg6lTbIXWwku7zAfBgNVHSMEGDAWgBRdOviKhKMdbTKUZg6lTbIXWwku\n"
-            + "7zAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAwNo\n"
-            + "ADBlAjB0YIhy54oo/WpQMgHCTDvdxUMO1NUWCQjo1HvaLit63u21zIJWLLMD1AtY\n"
-            + "yu4SO/wCMQCRvspXagNjZBp5NiE52QJectOeeImfvi/aWw95wcwzR+0RrdTt0dhr\n"
-            + "An+/A6IzwbQ=\n"
+            + "MIIB4zCCAWqgAwIBAgIUezpkTnymbnI0nMn3hJ0aXJYdtvAwCgYIKoZIzj0EAwMw\n"
+            + "ITEfMB0GA1UEAwwWUGVuZ3VpbiBURVNUIERldmljZSBDQTAeFw0yNjA4MTIyMDIz\n"
+            + "MDNaFw0zNjA4MDkyMDIzMDNaMCExHzAdBgNVBAMMFlBlbmd1aW4gVEVTVCBEZXZp\n"
+            + "Y2UgQ0EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAShKAZtDy2f2sS5KD2VZXEnnM9Z\n"
+            + "pdifOSjy0JUnkrgrC91SJhBrfJt+U99jLoE+bbeUbPX/h1/BhxuckgMSTWMJ3iBJ\n"
+            + "6Fkgbyfu7cl3tlKqAmB0XIH23rXM0HeCWvuuQKmjYzBhMB8GA1UdIwQYMBaAFCLK\n"
+            + "LP4JgC1HWvIV0esVb82E0YLQMB0GA1UdDgQWBBQiyiz+CYAtR1ryFdHrFW/NhNGC\n"
+            + "0DAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAwNn\n"
+            + "ADBkAjBu3lIe91/7oO39TOqlpfF09xUnTpiNOe4GNAjow56oguT4EiC9MM7jsb44\n"
+            + "PjV5e8oCMHkqQGnp48ROsurG8hr9qfR/Tt9wRTLml7k6XY2OtLLBqfXKcExj7iSJ\n"
+            + "iINa3pXDHw==\n"
             + "-----END CERTIFICATE-----\n";
 
     // Client certificate of the kind every device already holds: same CA, same CN and SANs as the
     // broker, extendedKeyUsage = clientAuth only.
     private static final String CLIENT_AUTH_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
-            + "MIICAjCCAYigAwIBAgIBETAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
-            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjE4MDQxNFoXDTI4MTAyMDE4MDQxNFow\n"
+            + "MIICAzCCAYigAwIBAgIBEjAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
+            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow\n"
             + "HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr\n"
-            + "gQQAIgNiAAQIp4q3tGLaGJ1/uLWIVlxhlo35ZBw00gB+cNHVudPPqucXmMsj31VZ\n"
-            + "6F7F+hvZA8gmMsz1IyfqHc0DYKVhh01sVOEMHDa0nCjdD13N5SOsHkanck1Gqnvd\n"
-            + "pmZPvPyZcdWjgZUwgZIwDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCB4AwEwYDVR0l\n"
+            + "gQQAIgNiAAQp6Mizi1Vmnkg1HdUjEggOIHu2BokL9q91/TR0F7Hoog1p8hT5mtIe\n"
+            + "W+vKVpl9EkL8fgZFOJFVIfNUKrhK7M79dOLQPQpT/2KLCrerW3HeKqKra2A5T7jy\n"
+            + "HF1XN3WU8kGjgZUwgZIwDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCBaAwEwYDVR0l\n"
             + "BAwwCgYIKwYBBQUHAwIwIAYDVR0RBBkwF4IJbG9jYWxob3N0hwR/AAABhwQKAAIC\n"
-            + "MB0GA1UdDgQWBBTCLwjxlpjUimo0Cp7L+baRRz+cTTAfBgNVHSMEGDAWgBRdOviK\n"
-            + "hKMdbTKUZg6lTbIXWwku7zAKBggqhkjOPQQDAwNoADBlAjAD1IsbbH4wcov/HLqV\n"
-            + "PUQ7gvWFR705uz2fNaFn/wnzFCYufKnm07LBMKbbFEG9htICMQDxd/aH4smZ0Q9y\n"
-            + "qgVNU6jlp9xkBy6xKMjilfqiVZo6+YdtEqnfnD91mL1j/xOoRng=\n"
+            + "MB0GA1UdDgQWBBQhaaVAN4Vhm4jdlVVdweWEVPZVNTAfBgNVHSMEGDAWgBQiyiz+\n"
+            + "CYAtR1ryFdHrFW/NhNGC0DAKBggqhkjOPQQDAwNpADBmAjEA8slft2p5beajn0io\n"
+            + "fGR4kF6X+MIgEfnfIw7eQ37Qp+iKuU7wau5FOC9MJf81b1EKAjEA5OyFt4pE89Yw\n"
+            + "NZR3GBzugcLd81J/4i2f7hyVWDA3I61/pF86+0jB1xvbGiI62zbC\n"
             + "-----END CERTIFICATE-----\n";
 
-    // Same CA and SANs, no extendedKeyUsage extension at all: unrestricted, so accepted.
+    // Same CA and SANs, no extendedKeyUsage extension at all. RFC 5280 leaves such a leaf
+    // unconstrained, but Apple's SSL policy rejects it, so this library does too.
     private static final String NO_EKU_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
-            + "MIIB6zCCAXGgAwIBAgIBEjAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
-            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjE4MDQxNFoXDTI4MTAyMDE4MDQxNFow\n"
+            + "MIIB6zCCAXGgAwIBAgIBEzAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
+            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow\n"
             + "HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr\n"
-            + "gQQAIgNiAAS5HANlVmZRi5rOe5y+7MfWAl5pi8FgiL2r3a0btQrtgcl8YOQCTxWv\n"
-            + "QHgg0T4FRmbymAw96uXPWvaYUWty4Ub7UJL5Kj2mXOU5RQlcXx7sY0qnEYTNFsl5\n"
-            + "AE+hl0LSbiujfzB9MAwGA1UdEwEB/wQCMAAwCwYDVR0PBAQDAgWgMCAGA1UdEQQZ\n"
-            + "MBeCCWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQUfGoq70Fuzs60e5RI\n"
-            + "K7ssjQyRflIwHwYDVR0jBBgwFoAUXTr4ioSjHW0ylGYOpU2yF1sJLu8wCgYIKoZI\n"
-            + "zj0EAwMDaAAwZQIxANCgsyc2G1klHRRu2aimQkDyJQRI0IsdnRoDNNqqb+1h9Brr\n"
-            + "qizl5buVvB4joASefAIwQ5OwQlHuexmbgxu4FJgAk69KIeOS5rZQIWiFzBQ0vSO+\n"
-            + "+TQHM1BITlZk4PHP7+II\n"
+            + "gQQAIgNiAAS5Qe6SYuoJ+ZYP754lBw1vzqwP6gzIlP1fxDoHZqK+ywcXxJX5ZPpm\n"
+            + "y3Ao3AY0C9TqHWvn0N3S4OcLJgDVgRE6SM9lPOT2iJztf9M+0FpjAbxSmFFawlRS\n"
+            + "eWDmFyAzJBujfzB9MAwGA1UdEwEB/wQCMAAwCwYDVR0PBAQDAgWgMCAGA1UdEQQZ\n"
+            + "MBeCCWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQUphse2hrlXfLOOEdf\n"
+            + "wupvevTRhwYwHwYDVR0jBBgwFoAUIsos/gmALUda8hXR6xVvzYTRgtAwCgYIKoZI\n"
+            + "zj0EAwMDaAAwZQIxAKsZrKX751oi6jDa4k86KMrE+xkV3LNQpImdLkcTAcIfnJKW\n"
+            + "bNbLzDxci71E+fLPiwIwWSXLM2m9iOIDrUmzheNY1UfvyvkODm2kcKCV8Reyd6uo\n"
+            + "O/RhZTyWyRvSn4X1/jB0\n"
+            + "-----END CERTIFICATE-----\n";
+
+    // Same CA and SANs, extendedKeyUsage = anyExtendedKeyUsage (2.5.29.37.0) alone. It claims
+    // every purpose rather than naming serverAuth, which Apple's SSL policy also rejects.
+    private static final String ANY_EKU_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIB/TCCAYSgAwIBAgIBFDAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
+            + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow\n"
+            + "HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr\n"
+            + "gQQAIgNiAARoIuFbEdo0Ei1gu7BMFps727AbxOZTSpCQhwmBncuKlMAlRQh4wl4m\n"
+            + "cOoApsu5lMlK7J9wn7Q910m6j4YpOFRjsttINJwmK1qXntsfCq84UWBlXNC0hCzu\n"
+            + "UQ7Xo4wLeF2jgZEwgY4wDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCBaAwDwYDVR0l\n"
+            + "BAgwBgYEVR0lADAgBgNVHREEGTAXgglsb2NhbGhvc3SHBH8AAAGHBAoAAgIwHQYD\n"
+            + "VR0OBBYEFKdrEWYs9BRumjvT6T86GTUPTSdkMB8GA1UdIwQYMBaAFCLKLP4JgC1H\n"
+            + "WvIV0esVb82E0YLQMAoGCCqGSM49BAMDA2cAMGQCMBG+InM8sC/OnW3FdtYxhXc+\n"
+            + "jvHv1Mu2HQgD2ly4G/FFc01bGjgDOqGcAy7mN3GqcgIwUNI9tPgxx4lNhEjJkfif\n"
+            + "0uIaRXba54JBEK011qKc/u+hqdKppkdnCKYtCHeQ9bUg\n"
             + "-----END CERTIFICATE-----\n";
 
     private static X509Certificate cert(String pem) throws Exception {
@@ -272,6 +291,25 @@ public class CustomTrustManagerTest {
         checkServerTrusted(tm, new X509Certificate[] { forged });
     }
 
+    @Test
+    public void testNoTrustAnchorsConfigured_Rejected() throws Exception {
+        // Fail closed when the trust store holds no CA: an empty anchor set makes PKIX
+        // unenforceable, so a valid-looking chain must not slip through unvalidated. iOS covers the
+        // symmetric case in TrustValidationTests.testNoAnchorsConfigured_Rejected.
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(), null, null);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+            fail("An empty trust store must not accept any server certificate");
+        } catch (CertificateException e) {
+            assertTrue("Message should name the missing CA configuration: " + e.getMessage(),
+                    e.getMessage().contains("No trusted CA certificates configured"));
+        }
+    }
+
     @Test(expected = CertificateException.class)
     public void testEmptyChain_Rejected() throws Exception {
         // Hits the chain == null || chain.length == 0 guard at the top of checkServerTrusted,
@@ -326,16 +364,42 @@ public class CustomTrustManagerTest {
     }
 
     @Test
-    public void testServerCertificateWithNoEKUExtension_Accepted() throws Exception {
-        // A leaf with no extendedKeyUsage extension is unrestricted. iOS accepts it too, so
-        // rejecting it here would break brokers that still connect on iOS. Pinned deliberately:
-        // tightening this is a behaviour change, not a bug fix.
+    public void testServerCertificateWithNoEKUExtension_Rejected() throws Exception {
+        // RFC 5280 leaves a leaf with no extendedKeyUsage extension unconstrained, so PKIX accepts
+        // it. Apple's SSL policy does not — SecPolicyCreateSSL(true, nil) fails it with "Extended
+        // key usage does not match certificate usage" — so accepting it here would be an
+        // Android-only relaxation on a broker the iOS build cannot reach anyway.
         X509Certificate ca = cert(DEVICE_CA_PEM);
         X509Certificate noEkuLeaf = cert(NO_EKU_LEAF_PEM);
 
         Object tm = newTrustManager(trustStoreWith(ca), null, null);
 
-        checkServerTrusted(tm, new X509Certificate[] { noEkuLeaf });
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { noEkuLeaf });
+            fail("A leaf with no extendedKeyUsage must not be accepted as the broker");
+        } catch (CertificateException e) {
+            assertTrue("Message should name the missing extended key usage: " + e.getMessage(),
+                    e.getMessage().contains("declares no extended key usage"));
+        }
+    }
+
+    @Test
+    public void testServerCertificateWithAnyExtendedKeyUsage_Rejected() throws Exception {
+        // anyExtendedKeyUsage claims every purpose instead of naming serverAuth. Apple rejects it
+        // for the same reason as the no-EKU case, so this library requires id-kp-serverAuth
+        // explicitly rather than treating the any-purpose OID as a substitute.
+        X509Certificate ca = cert(DEVICE_CA_PEM);
+        X509Certificate anyEkuLeaf = cert(ANY_EKU_LEAF_PEM);
+
+        Object tm = newTrustManager(trustStoreWith(ca), null, null);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { anyEkuLeaf });
+            fail("A leaf asserting only anyExtendedKeyUsage must not be accepted as the broker");
+        } catch (CertificateException e) {
+            assertTrue("Message should name TLS server authentication: " + e.getMessage(),
+                    e.getMessage().contains("not valid for TLS server authentication"));
+        }
     }
 
     @Test
@@ -510,6 +574,16 @@ public class CustomTrustManagerTest {
         assertEquals("penguin-broker.local", cnFromDn("O=Generac,CN=penguin-broker.local,C=US"));
         // An O value that merely contains "CN=" must not be mistaken for the CN attribute.
         assertEquals("real", cnFromDn("O=not a CN=decoy,CN=real"));
+    }
+
+    @Test
+    public void testCnFromDn_MultiValuedRdn_SplitsOnUnescapedPlus() throws Exception {
+        // RFC 2253 joins the attributes of a multi-valued RDN with '+', so splitting on commas
+        // alone leaves the CN reading "penguin-broker.local+OU=field" and the pin fails on a
+        // certificate that should match. An escaped '+' stays part of the value.
+        assertEquals("penguin-broker.local", cnFromDn("CN=penguin-broker.local+OU=field"));
+        assertEquals("penguin-broker.local", cnFromDn("OU=field+CN=penguin-broker.local,O=Generac"));
+        assertEquals("a+b", cnFromDn("CN=a\\+b,O=Generac"));
     }
 
     @Test

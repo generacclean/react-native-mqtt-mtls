@@ -4,9 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [1.4.0] - 2026-08-12
 
-> A minor bump rather than a patch: the public API is unchanged, but server certificates that
-> previous versions accepted are now rejected (expired, wrong-host, and non-server certificates),
-> and this version must ship together with react-native-ecc-csr 1.4.0+.
+> A minor bump rather than a patch: the public API is unchanged, but Android now rejects server
+> certificates that 1.3.x accepted — any leaf that does not assert the `serverAuth` extended key
+> usage — and this version must ship together with react-native-ecc-csr 1.4.0+. (Expiry and
+> host-mismatch rejection landed earlier in this release line; the EKU check is what is new here.)
 
 ### Fixed
 
@@ -14,7 +15,8 @@ All notable changes to this project will be documented in this file.
   - **Android**: `CustomTrustManager.checkServerTrusted` validated the chain via hand-rolled per-issuer signature loops with no expiry check and no hostname/SAN matching, so a certificate validly issued by a trusted CA for one host was accepted when connecting to a different host, and expired certificates were accepted. Replaced with the platform `CertPathValidator` ("PKIX"), which enforces expiry, path-length, and basic-constraints, and added SAN matching against the expected SNI host.
   - **iOS**: `didReceive(trust:)` accepted any server certificate unconditionally in admin mode, and only did a CN string comparison otherwise — the app-provided root CA bundle was parsed but never evaluated against the presented chain. Now validates the chain via `SecTrustEvaluateWithError` against app-provided anchors unconditionally; admin mode only skips the CN pin, never chain validation.
   - On both platforms, chain validation always runs; identity pinning is skipped only when no expected value is configured (admin mode). The two platforms do not pin the same thing: Android matches the presented certificate's SANs (DNS and iPAddress) against the expected SNI host in addition to comparing CN, while iOS still only compares CN. `SecPolicyCreateSSL(true, nil)` is created without a hostname, so iOS performs no SAN check — closing that gap is tracked separately.
-  - Both platforms also require the leaf to be a TLS server certificate. iOS gets this from `SecPolicyCreateSSL(true, nil)`; Android checks `getExtendedKeyUsage()` directly, because bare `PKIXParameters` validates that a certificate is genuine, not what it is for. Without it, a device's own *client* certificate from the same CA — every device holds one — would be accepted as the broker whenever the CN and SAN pins are skipped, which is every production connection today. A leaf that asserts no extended key usage at all is unrestricted and still accepted, on both platforms.
+  - Both platforms now require the leaf to be a TLS server certificate, and this closes the EKU asymmetry the 1.3.x notes recorded as a known gap. iOS gets the check from `SecPolicyCreateSSL(true, nil)`; Android checks `getExtendedKeyUsage()` directly, because bare `PKIXParameters` validates that a certificate is genuine, not what it is for. Without it, a device's own *client* certificate from the same CA — every device holds one — would be accepted as the broker whenever the CN and SAN pins are skipped, which is every production connection today.
+  - Android requires `id-kp-serverAuth` (1.3.6.1.5.5.7.3.1) to be present explicitly. Two cases are rejected for parity with Apple's policy rather than because RFC 5280 demands it: a leaf with no `extendedKeyUsage` extension at all (unconstrained per RFC 5280) and a leaf asserting only `anyExtendedKeyUsage` (2.5.29.37.0). `SecPolicyCreateSSL(true, nil)` fails both with "Extended key usage does not match certificate usage", verified against the Security framework in `TrustValidatorTests` (`testLeafWithNoExtendedKeyUsage_Rejected`, `testLeafWithAnyExtendedKeyUsage_Rejected`, with a `serverAuth` control), so accepting either on Android would be a one-platform relaxation for a broker the iOS build cannot reach anyway.
   - What chain validation still does not check: revocation is off on both platforms (`params.setRevocationEnabled(false)` on Android; iOS does not opt in), because the private gateway CA publishes no CRL or OCSP responder, so a revoked broker certificate is accepted until it expires.
   - Residual risk, accepted: the installer app passes `isAdminUser: true` on every connection, so `expectedBrokerCN` and `expectedSniHost` are null in production and neither the CN nor the SAN pin runs today. What this release buys in production is chain validation — expiry, path length, basic constraints, and a signature chain to an app-provided anchor — which previously did not run at all on iOS. Any certificate issued by the trusted CA is still accepted for any host until the app stops forcing admin mode.
 
@@ -31,6 +33,23 @@ All notable changes to this project will be documented in this file.
   - An absolute path that no longer exists is retried by filename under both directories. The installer persists `keystorePath` across launches, so immediately after upgrading it supplies a `files/` path for a keystore ecc-csr has already moved; without this fallback the first post-upgrade connect would fail
   - The app-private containment check now accepts either directory, and is applied after resolution so neither a caller-supplied path nor the fallback can escape via `..`
   - Requires ecc-csr 1.4.0+ to be shipped together with this version
+
+- **Parse multi-valued RDNs when reading the broker CN**
+  - The RFC 2253 DN parser split on unescaped commas but not on the unescaped `+` that joins the attributes of a multi-valued RDN, so `CN=penguin-broker.local+OU=field` read back as `penguin-broker.local+OU=field` and failed the CN pin on a certificate that should have matched. Fail-closed either way (a spurious mismatch, never a false accept), and the CN pin does not run in production today, but the parser now handles both separators
+
+### Documentation
+
+- **`sniHostname` is Android-only certificate verification**
+  - The JSDoc on `MqttConnectionConfig.sniHostname` and the README feature list promised hostname verification without naming a platform. Android matches the value against the certificate's subjectAltName entries (DNS and iPAddress, exact, no wildcards) and never sends it as the TLS SNI extension; iOS only announces it as `kCFStreamSSLPeerName` and performs no SAN check, because its policy is built with a nil hostname. Both surfaces now say so, instead of leaving the split documented only in release notes
+- **`docs/RUNNING_TESTS.md` rewritten against the test infrastructure that exists**
+  - It described iOS tests as needing an Xcode project that must be created by hand, and listed only the binary-detection and callback suites. It now documents `swift test` and the `TrustValidation` SwiftPM package, the two CI workflows, the JDK 17 requirement for `./gradlew test`, the trust and path-resolution suites, and — still accurately — that `ios/MqttModuleTests.swift` alone needs a host app
+  - `yarn test:ios` now runs `swift test` instead of printing a pointer to that document and exiting 1
+
+### Tests
+
+- iOS `TrustValidatorTests` covers what Apple's SSL policy does with each `extendedKeyUsage` value, using four leaves from one CA that differ in nothing else: `serverAuth` accepted as the control, `clientAuth`, no EKU extension, and `anyExtendedKeyUsage` all rejected. This is the evidence for the Android EKU decision above rather than an assumption about it
+- Android `CustomTrustManagerTest` covers the empty-trust-store guard (`No trusted CA certificates configured`), which had no test on Android although iOS covered the symmetric case, plus the no-EKU and anyExtendedKeyUsage rejections and multi-valued RDN parsing
+- Android `MqttModulePathResolutionTest` covers a null `getNoBackupFilesDir()` — declared `@Nullable`, previously always mocked to a real directory — so the fallback to `filesDir` for resolution and containment is exercised
 
 ## [1.3.2] - 2026-08-05
 

@@ -97,6 +97,95 @@ final class TrustValidatorTests: XCTestCase {
     -----END CERTIFICATE-----
     """
 
+    // A second self-signed CA, standing in for the gateway CA that issues both broker and device
+    // certificates. The four leaves below are identical apart from extendedKeyUsage, so the EKU
+    // tests turn on that extension alone. They pin what Apple's SSL policy does with each value,
+    // which is what CustomTrustManager.requireTlsServerCertificate matches on Android.
+    private static let deviceCAPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIB4zCCAWqgAwIBAgIUezpkTnymbnI0nMn3hJ0aXJYdtvAwCgYIKoZIzj0EAwMw
+    ITEfMB0GA1UEAwwWUGVuZ3VpbiBURVNUIERldmljZSBDQTAeFw0yNjA4MTIyMDIz
+    MDNaFw0zNjA4MDkyMDIzMDNaMCExHzAdBgNVBAMMFlBlbmd1aW4gVEVTVCBEZXZp
+    Y2UgQ0EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAShKAZtDy2f2sS5KD2VZXEnnM9Z
+    pdifOSjy0JUnkrgrC91SJhBrfJt+U99jLoE+bbeUbPX/h1/BhxuckgMSTWMJ3iBJ
+    6Fkgbyfu7cl3tlKqAmB0XIH23rXM0HeCWvuuQKmjYzBhMB8GA1UdIwQYMBaAFCLK
+    LP4JgC1HWvIV0esVb82E0YLQMB0GA1UdDgQWBBQiyiz+CYAtR1ryFdHrFW/NhNGC
+    0DAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAwNn
+    ADBkAjBu3lIe91/7oO39TOqlpfF09xUnTpiNOe4GNAjow56oguT4EiC9MM7jsb44
+    PjV5e8oCMHkqQGnp48ROsurG8hr9qfR/Tt9wRTLml7k6XY2OtLLBqfXKcExj7iSJ
+    iINa3pXDHw==
+    -----END CERTIFICATE-----
+    """
+
+    // extendedKeyUsage = serverAuth: the control. If this one failed, a rejection below could be
+    // caused by anything in the fixture rather than by the EKU value.
+    private static let deviceServerAuthLeafPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIICAjCCAYigAwIBAgIBETAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu
+    IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow
+    HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr
+    gQQAIgNiAARqe6mgKHgBbj/N2TCpgpFKGPDiKIy2a7Kixr+k2YXnfxlWG6pAbRft
+    kxEF/pYSG0RzJ7N41Y13GZp8PJ6kZcV7sviSwsW31McUd3VX4sdyr4wR+y4bndgB
+    MRW0IAczXLSjgZUwgZIwDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCBaAwEwYDVR0l
+    BAwwCgYIKwYBBQUHAwEwIAYDVR0RBBkwF4IJbG9jYWxob3N0hwR/AAABhwQKAAIC
+    MB0GA1UdDgQWBBRdPrv1HbVEy7tJvWZGkoqCaB0z6TAfBgNVHSMEGDAWgBQiyiz+
+    CYAtR1ryFdHrFW/NhNGC0DAKBggqhkjOPQQDAwNoADBlAjEA2KCxLYaDmntG5BpA
+    LHSk5PASsMKNhY7vAkEmcHGUFjGS5DXW6lODPDhckkJJk49bAjBF6OsNt/7pNycM
+    3C3u/J+901Aex4PH1c5L03HbVT52fKkqb3WsrGiclIrsTs21mOQ=
+    -----END CERTIFICATE-----
+    """
+
+    // extendedKeyUsage = clientAuth: the certificate every device already holds.
+    private static let deviceClientAuthLeafPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIICAzCCAYigAwIBAgIBEjAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu
+    IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow
+    HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr
+    gQQAIgNiAAQp6Mizi1Vmnkg1HdUjEggOIHu2BokL9q91/TR0F7Hoog1p8hT5mtIe
+    W+vKVpl9EkL8fgZFOJFVIfNUKrhK7M79dOLQPQpT/2KLCrerW3HeKqKra2A5T7jy
+    HF1XN3WU8kGjgZUwgZIwDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCBaAwEwYDVR0l
+    BAwwCgYIKwYBBQUHAwIwIAYDVR0RBBkwF4IJbG9jYWxob3N0hwR/AAABhwQKAAIC
+    MB0GA1UdDgQWBBQhaaVAN4Vhm4jdlVVdweWEVPZVNTAfBgNVHSMEGDAWgBQiyiz+
+    CYAtR1ryFdHrFW/NhNGC0DAKBggqhkjOPQQDAwNpADBmAjEA8slft2p5beajn0io
+    fGR4kF6X+MIgEfnfIw7eQ37Qp+iKuU7wau5FOC9MJf81b1EKAjEA5OyFt4pE89Yw
+    NZR3GBzugcLd81J/4i2f7hyVWDA3I61/pF86+0jB1xvbGiI62zbC
+    -----END CERTIFICATE-----
+    """
+
+    // No extendedKeyUsage extension at all.
+    private static let deviceNoEkuLeafPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIB6zCCAXGgAwIBAgIBEzAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu
+    IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow
+    HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr
+    gQQAIgNiAAS5Qe6SYuoJ+ZYP754lBw1vzqwP6gzIlP1fxDoHZqK+ywcXxJX5ZPpm
+    y3Ao3AY0C9TqHWvn0N3S4OcLJgDVgRE6SM9lPOT2iJztf9M+0FpjAbxSmFFawlRS
+    eWDmFyAzJBujfzB9MAwGA1UdEwEB/wQCMAAwCwYDVR0PBAQDAgWgMCAGA1UdEQQZ
+    MBeCCWxvY2FsaG9zdIcEfwAAAYcECgACAjAdBgNVHQ4EFgQUphse2hrlXfLOOEdf
+    wupvevTRhwYwHwYDVR0jBBgwFoAUIsos/gmALUda8hXR6xVvzYTRgtAwCgYIKoZI
+    zj0EAwMDaAAwZQIxAKsZrKX751oi6jDa4k86KMrE+xkV3LNQpImdLkcTAcIfnJKW
+    bNbLzDxci71E+fLPiwIwWSXLM2m9iOIDrUmzheNY1UfvyvkODm2kcKCV8Reyd6uo
+    O/RhZTyWyRvSn4X1/jB0
+    -----END CERTIFICATE-----
+    """
+
+    // extendedKeyUsage = anyExtendedKeyUsage (2.5.29.37.0) alone.
+    private static let deviceAnyEkuLeafPEM = """
+    -----BEGIN CERTIFICATE-----
+    MIIB/TCCAYSgAwIBAgIBFDAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu
+    IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow
+    HzEdMBsGA1UEAwwUcGVuZ3Vpbi1icm9rZXIubG9jYWwwdjAQBgcqhkjOPQIBBgUr
+    gQQAIgNiAARoIuFbEdo0Ei1gu7BMFps727AbxOZTSpCQhwmBncuKlMAlRQh4wl4m
+    cOoApsu5lMlK7J9wn7Q910m6j4YpOFRjsttINJwmK1qXntsfCq84UWBlXNC0hCzu
+    UQ7Xo4wLeF2jgZEwgY4wDAYDVR0TAQH/BAIwADALBgNVHQ8EBAMCBaAwDwYDVR0l
+    BAgwBgYEVR0lADAgBgNVHREEGTAXgglsb2NhbGhvc3SHBH8AAAGHBAoAAgIwHQYD
+    VR0OBBYEFKdrEWYs9BRumjvT6T86GTUPTSdkMB8GA1UdIwQYMBaAFCLKLP4JgC1H
+    WvIV0esVb82E0YLQMAoGCCqGSM49BAMDA2cAMGQCMBG+InM8sC/OnW3FdtYxhXc+
+    jvHv1Mu2HQgD2ly4G/FFc01bGjgDOqGcAy7mN3GqcgIwUNI9tPgxx4lNhEjJkfif
+    0uIaRXba54JBEK011qKc/u+hqdKppkdnCKYtCHeQ9bUg
+    -----END CERTIFICATE-----
+    """
+
     private static func certificate(fromPEM pem: String) -> SecCertificate {
         let base64 = pem
             .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
@@ -263,4 +352,53 @@ final class TrustValidatorTests: XCTestCase {
 
         XCTAssertEqual(cn, "penguin-broker.local", "CN extraction must read the subject CN")
     }
+
+    // MARK: - Extended key usage: what Apple's SSL policy accepts
+
+    // These four cases document the behaviour CustomTrustManager.requireTlsServerCertificate is
+    // written to match on Android. SecPolicyCreateSSL(true, nil) requires the leaf to assert
+    // id-kp-serverAuth explicitly: a leaf with no EKU extension and a leaf asserting only
+    // anyExtendedKeyUsage are both refused with "Extended key usage does not match certificate
+    // usage", so neither is a broker the iOS build can reach.
+
+    func testServerAuthLeaf_Trusted() {
+        let leaf = Self.certificate(fromPEM: Self.deviceServerAuthLeafPEM)
+        let ca = Self.certificate(fromPEM: Self.deviceCAPEM)
+
+        let trust = Self.makeTrust(presenting: [leaf])
+
+        XCTAssertTrue(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                      "A serverAuth leaf under the configured anchor must be trusted — this is the control the three rejections below are measured against")
+    }
+
+    func testClientAuthOnlyLeaf_Rejected() {
+        let leaf = Self.certificate(fromPEM: Self.deviceClientAuthLeafPEM)
+        let ca = Self.certificate(fromPEM: Self.deviceCAPEM)
+
+        let trust = Self.makeTrust(presenting: [leaf])
+
+        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                       "A device's own clientAuth certificate must not be accepted as the broker")
+    }
+
+    func testLeafWithNoExtendedKeyUsage_Rejected() {
+        let leaf = Self.certificate(fromPEM: Self.deviceNoEkuLeafPEM)
+        let ca = Self.certificate(fromPEM: Self.deviceCAPEM)
+
+        let trust = Self.makeTrust(presenting: [leaf])
+
+        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                       "Apple's SSL policy requires an explicit serverAuth EKU: absent EKU is not treated as unrestricted")
+    }
+
+    func testLeafWithAnyExtendedKeyUsage_Rejected() {
+        let leaf = Self.certificate(fromPEM: Self.deviceAnyEkuLeafPEM)
+        let ca = Self.certificate(fromPEM: Self.deviceCAPEM)
+
+        let trust = Self.makeTrust(presenting: [leaf])
+
+        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                       "anyExtendedKeyUsage is not a substitute for serverAuth under Apple's SSL policy")
+    }
+
 }

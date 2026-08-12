@@ -163,6 +163,19 @@ public class MqttModulePathResolutionTest {
     }
 
     @Test
+    public void testNoBackupDirUnavailable_ResolvesUnderFilesDir() throws Exception {
+        // keystoreRoots() skips a null getNoBackupFilesDir(). Context#getNoBackupFilesDir is
+        // declared @Nullable, so on a device where it returns null the resolution and the
+        // containment check both have to fall back to filesDir instead of throwing.
+        when(mockContext.getNoBackupFilesDir()).thenReturn(null);
+        File legacy = new File(filesDir, KEYSTORE_NAME);
+        assertTrue("Precondition: keystore file created under files/", legacy.createNewFile());
+
+        assertEquals("A null no-backup dir must leave filesDir as the resolution root",
+            legacy.getAbsolutePath(), resolve(KEYSTORE_NAME).getAbsolutePath());
+    }
+
+    @Test
     public void testAbsolutePath_OutsideFilesDir_Rejected() throws Exception {
         String outsidePath = new File(tempFolder.getRoot(), "evil.p12").getAbsolutePath();
 

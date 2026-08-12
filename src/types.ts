@@ -41,6 +41,14 @@ export interface MqttConfig {
   /**
    * Expected SNI hostname for certificate verification.
    * Required when isAdminUser is false. Ignored when isAdminUser is true.
+   *
+   * The two platforms use this value differently, so it is not a cross-platform hostname check:
+   * - Android matches it against the broker certificate's subjectAltName entries (DNS and
+   *   iPAddress, exact match, no wildcards), so connecting by IP requires that IP in the SAN list.
+   *   It is not sent as the TLS SNI extension.
+   * - iOS sends it as the announced SNI hostname (`kCFStreamSSLPeerName`) only. Trust evaluation
+   *   uses `SecPolicyCreateSSL(true, nil)` with no hostname, so no SAN match is performed and
+   *   `brokerCommonName` is the only iOS identity pin.
    */
   sniHostname?: string;
   /**

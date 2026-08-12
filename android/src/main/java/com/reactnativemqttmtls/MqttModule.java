@@ -261,8 +261,6 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private static class CustomTrustManager implements X509TrustManager {
         /** id-kp-serverAuth: the certificate may authenticate a TLS server. */
         private static final String EKU_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
-        /** anyExtendedKeyUsage: the certificate is valid for every purpose, server auth included. */
-        private static final String EKU_ANY = "2.5.29.37.0";
 
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
@@ -405,7 +403,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         /**
-         * Rejects a leaf that declares what it is for and leaves out TLS server authentication.
+         * Requires the leaf to assert id-kp-serverAuth explicitly, and rejects it otherwise.
          *
          * PKIX checks signatures, validity dates, path length, and basic constraints, but not the
          * leaf's purpose. Every device holds a *client* certificate from the same gateway CA, so
@@ -413,10 +411,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
          * are skipped — which is every production connection today, since the app forces admin
          * mode. This is the check iOS gets from SecPolicyCreateSSL(true, nil).
          *
-         * A leaf with no extendedKeyUsage extension is unrestricted and passes with a warning:
-         * that is what X509CertSelector.setExtendedKeyUsage means by "implicitly supports all key
-         * usages" and what the iOS SSL policy accepts, so tightening it here would reject brokers
-         * iOS still connects to.
+         * Two cases are rejected for parity with that iOS policy rather than because PKIX asks
+         * for it. A leaf with no extendedKeyUsage extension at all is unconstrained as far as
+         * RFC 5280 is concerned, and a leaf asserting anyExtendedKeyUsage (2.5.29.37.0) claims
+         * every purpose — but Apple's SSL policy rejects both with "Extended key usage does not
+         * match certificate usage", so a broker that presents either cannot be reached from the
+         * iOS build today and accepting it here would be an Android-only relaxation.
          */
         private void requireTlsServerCertificate(X509Certificate leaf) throws CertificateException {
             List<String> purposes;
@@ -428,12 +428,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
             }
 
             if (purposes == null) {
-                Log.w(TAG, "Broker certificate declares no extended key usage — it is not "
-                        + "restricted to TLS server authentication");
-                return;
+                Log.e(TAG, "EKU MISSING! Certificate declares no extended key usage, so it does not "
+                        + "assert TLS server authentication");
+                throw new CertificateException(
+                        "Broker certificate declares no extended key usage; it is not a TLS server "
+                                + "certificate");
             }
 
-            if (purposes.contains(EKU_SERVER_AUTH) || purposes.contains(EKU_ANY)) {
+            if (purposes.contains(EKU_SERVER_AUTH)) {
                 Log.d(TAG, "✓ Broker certificate is valid for TLS server authentication");
                 return;
             }
@@ -498,14 +500,14 @@ public class MqttModule extends ReactContextBaseJavaModule {
          * value as {@code \,}, so {@code CN=Acme\, Inc,O=Acme} splits into two RDNs and the CN comes
          * back truncated to {@code Acme\}. Since this value is compared against the expected broker
          * CN, a truncated read is a failed pin rather than a cosmetic bug. Splitting on unescaped
-         * commas only, then unescaping the value, handles it. javax.naming.ldap.LdapName would do
-         * this properly but is not available on Android.
+         * separators only, then unescaping the value, handles it. javax.naming.ldap.LdapName would
+         * do this properly but is not available on Android.
          */
         static String cnFromDn(String dn) {
             if (dn == null) {
                 return null;
             }
-            for (String rdn : splitOnUnescapedCommas(dn)) {
+            for (String rdn : splitOnUnescapedSeparators(dn)) {
                 String trimmed = rdn.trim();
                 // Attribute types are case-insensitive per RFC 4519.
                 if (trimmed.regionMatches(true, 0, "CN=", 0, 3)) {
@@ -515,7 +517,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
             return null;
         }
 
-        private static List<String> splitOnUnescapedCommas(String dn) {
+        /**
+         * Splits a DN on the two separators RFC 2253 defines: {@code ,} between RDNs and {@code +}
+         * between the attributes of a multi-valued RDN. Without the {@code +} case,
+         * {@code CN=broker.local+OU=field} yields one part whose value reads
+         * {@code broker.local+OU=field} and the CN pin fails on a certificate that should match.
+         */
+        private static List<String> splitOnUnescapedSeparators(String dn) {
             List<String> parts = new ArrayList<>();
             StringBuilder current = new StringBuilder();
             boolean escaped = false;
@@ -527,7 +535,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 } else if (c == '\\') {
                     current.append(c);
                     escaped = true;
-                } else if (c == ',') {
+                } else if (c == ',' || c == '+') {
                     parts.add(current.toString());
                     current.setLength(0);
                 } else {
