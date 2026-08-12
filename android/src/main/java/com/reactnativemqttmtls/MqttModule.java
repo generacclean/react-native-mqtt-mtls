@@ -1075,6 +1075,77 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Directories the software keystore may legitimately live in, in preference order.
+     *
+     * react-native-ecc-csr 1.3.1+ writes the keystore to getNoBackupFilesDir() so the private key is
+     * excluded from Android Auto Backup unconditionally; earlier versions used getFilesDir(). Both
+     * are app-private, so both are accepted - and filesDir has to stay accepted because a device
+     * that has not yet run the ecc-csr migration still has its keystore there.
+     */
+    private List<File> keystoreRoots() {
+        List<File> roots = new ArrayList<>();
+        File noBackupDir = getReactApplicationContext().getNoBackupFilesDir();
+        if (noBackupDir != null) {
+            roots.add(noBackupDir);
+        }
+        File filesDir = getReactApplicationContext().getFilesDir();
+        if (filesDir != null) {
+            roots.add(filesDir);
+        }
+        return roots;
+    }
+
+    /**
+     * Resolves the keystore location, tolerating both storage generations.
+     *
+     * - Absolute path that exists: used verbatim.
+     * - Absolute path that does not exist: retried by filename under each root. This is what makes
+     *   the ecc-csr no-backup move invisible to the app. The installer persists keystorePath across
+     *   launches, so right after upgrading it hands us a files/ path for a file ecc-csr has already
+     *   moved to no_backup/; without this retry the first post-upgrade connect fails.
+     * - Relative path or default: resolved against each root in order.
+     *
+     * @return the first candidate that exists, or the preferred candidate when none do, so the
+     *         caller's not-found error names the location the keystore is supposed to be in
+     */
+    private File resolveKeystoreFile(String filename) {
+        List<File> candidates = new ArrayList<>();
+        File supplied = new File(filename);
+        if (supplied.isAbsolute()) {
+            candidates.add(supplied);
+            for (File root : keystoreRoots()) {
+                candidates.add(new File(root, supplied.getName()));
+            }
+        } else {
+            for (File root : keystoreRoots()) {
+                candidates.add(new File(root, filename));
+            }
+        }
+        if (candidates.isEmpty()) {
+            return supplied;
+        }
+        for (File candidate : candidates) {
+            if (candidate.exists()) {
+                return candidate;
+            }
+        }
+        return candidates.get(0);
+    }
+
+    /**
+     * Whether the resolved keystore path sits inside one of the app-private keystore roots.
+     */
+    private boolean isInsideKeystoreRoot(File keystoreFile) throws IOException {
+        String canonicalKeystorePath = keystoreFile.getCanonicalPath();
+        for (File root : keystoreRoots()) {
+            if (canonicalKeystorePath.startsWith(root.getCanonicalPath() + File.separator)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Loads software keystore with dual-format support for migration compatibility.
      *
      * Supports both:
@@ -1084,7 +1155,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * This addresses PR #4 reviewer Blocker B by making the keystore contract explicit.
      * The path, password, and format are now API parameters instead of hidden filesystem conventions.
      *
-     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE)
+     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE);
+     *                     see {@link #resolveKeystoreFile(String)} for how it is resolved
      * @param keystorePassword Password for keystore, or null to use empty string
      * @param keystoreFormat Format hint: "pkcs12", "encrypted", or null for auto-detect
      * @return KeyStore loaded from the specified keystore file
@@ -1095,22 +1167,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
         String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
         String password = (keystorePassword != null) ? keystorePassword : "";
 
-        // Absolute paths (from ecc-csr 1.3.1+) are used directly; relative paths
-        // (legacy/default) are resolved against filesDir.
-        File keystoreFile;
-        File candidate = new File(filename);
-        File filesDir = getReactApplicationContext().getFilesDir();
-        if (candidate.isAbsolute()) {
-            keystoreFile = candidate;
-        } else {
-            keystoreFile = new File(filesDir, filename);
-        }
+        File keystoreFile = resolveKeystoreFile(filename);
 
-        // Containment check: the resolved path must stay within app-private storage,
-        // even for absolute paths supplied across the RN bridge.
-        String canonicalKeystorePath = keystoreFile.getCanonicalPath();
-        if (!canonicalKeystorePath.startsWith(filesDir.getCanonicalPath() + File.separator)) {
-            throw new KeyException("Keystore path must be inside app-private storage: " + canonicalKeystorePath);
+        // Containment check: the resolved path must stay within app-private storage, even for
+        // absolute paths supplied across the RN bridge. Checked after resolution so neither the
+        // caller-supplied path nor the no-backup fallback can escape via "..".
+        if (!isInsideKeystoreRoot(keystoreFile)) {
+            throw new KeyException("Keystore path must be inside app-private storage: " + keystoreFile.getCanonicalPath());
         }
 
         // Check if keystore file exists

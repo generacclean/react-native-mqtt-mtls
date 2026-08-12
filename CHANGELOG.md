@@ -18,6 +18,13 @@ All notable changes to this project will be documented in this file.
   - Related: react-native-ecc-csr 1.3.1 now returns explicit keystore descriptors with absolute paths
   - Resolved keystore paths (absolute or relative) are now checked to remain inside app-private storage before being opened
 
+- **Load the keystore from `getNoBackupFilesDir()` (ecc-csr 1.3.1+)**
+  - react-native-ecc-csr 1.3.1 moved the software keystore from `getFilesDir()` to `getNoBackupFilesDir()` so the private key is excluded from Android Auto Backup unconditionally, instead of depending on the consuming app's `fullBackupContent`/`dataExtractionRules` configuration
+  - `loadSoftwareKeyStore()` now resolves relative/default paths against `getNoBackupFilesDir()` first and falls back to `getFilesDir()`, so devices that have not yet run the ecc-csr migration keep working
+  - An absolute path that no longer exists is retried by filename under both directories. The installer persists `keystorePath` across launches, so immediately after upgrading it supplies a `files/` path for a keystore ecc-csr has already moved; without this fallback the first post-upgrade connect would fail
+  - The app-private containment check now accepts either directory, and is applied after resolution so neither a caller-supplied path nor the fallback can escape via `..`
+  - Requires ecc-csr 1.3.1+ to be shipped together with this version
+
 ## [1.3.0] - 2026-07-20
 
 ### ⚠️ BREAKING CHANGE

@@ -58,6 +58,12 @@ export interface MqttConfig {
    * If not provided, defaults to 'software_keys.p12' for backward compatibility.
    * This makes the keystore location explicit in the API instead of a hidden filesystem convention.
    *
+   * Relative paths and the default are resolved against the app's no-backup directory first
+   * (where react-native-ecc-csr 1.3.1+ stores the keystore), then the files directory. An
+   * absolute path is used as-is when it exists; if it does not, the same filename is retried in
+   * both directories, so a path persisted before the ecc-csr no-backup migration still resolves.
+   * Either way the resolved path must stay inside app-private storage.
+   *
    * Note: iOS loads keys from Keychain using the privateKeyAlias - this parameter is ignored.
    */
   keystorePath?: string;
