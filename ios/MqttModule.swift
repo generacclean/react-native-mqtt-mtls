@@ -77,6 +77,7 @@ class MqttModule: RCTEventEmitter {
 
     private var mqttClient: CocoaMQTT?
     private var expectedBrokerCN: String?
+    private var trustedRootCerts: [SecCertificate] = []
     private var connectSuccessCallback: RCTResponseSenderBlock?
     private var connectErrorCallback: RCTResponseSenderBlock?
     private var brokerUrl: String = ""
@@ -154,6 +155,7 @@ class MqttModule: RCTEventEmitter {
         connectSuccessCallback = nil
         connectErrorCallback = nil
         expectedBrokerCN = nil
+        trustedRootCerts = []
         brokerUrl = ""
         clientIdentifier = ""
         connectionStartTime = nil
@@ -333,6 +335,7 @@ class MqttModule: RCTEventEmitter {
                 }
                 
                 self.expectedBrokerCN = effectiveBrokerCN  // nil for admin — CN validation skipped
+                self.trustedRootCerts = caCerts  // anchors for server chain validation (always required)
                 os_log("  ✓ CA certificates validated", log: logger, type: .info)
                 os_log("", log: logger, type: .info)
                 
@@ -738,65 +741,6 @@ class MqttModule: RCTEventEmitter {
         return certificates
     }
     
-    // ============================================================================
-    // CN EXTRACTION
-    // ============================================================================
-    
-    private func extractCommonName(from certificate: SecCertificate) -> String? {
-        os_log("              → extractCommonName()", log: logger, type: .info)
-        
-        if let cn = extractCNFromSubjectSummary(certificate) {
-            return cn
-        }
-        
-        os_log("              - Trying deprecated API...", log: logger, type: .info)
-        var commonName: CFString?
-        let status = SecCertificateCopyCommonName(certificate, &commonName)
-        
-        if status == errSecSuccess, let cn = commonName as String? {
-            os_log("              ✓ CN via deprecated API: %{public}@", log: logger, type: .info, cn)
-            return cn
-        }
-        
-        os_log("              ✗ Failed to extract CN", log: logger, type: .error)
-        return nil
-    }
-    
-    private func extractCNFromSubjectSummary(_ certificate: SecCertificate) -> String? {
-        guard let summary = SecCertificateCopySubjectSummary(certificate) as String? else {
-            return nil
-        }
-        
-        os_log("              - Certificate summary: %{public}@", log: logger, type: .info, summary)
-        
-        if !summary.contains("=") && !summary.contains(",") {
-            os_log("              ✓ CN (simple): %{public}@", log: logger, type: .info, summary)
-            return summary
-        }
-        
-        let components = summary.components(separatedBy: ",")
-        for component in components {
-            let trimmed = component.trimmingCharacters(in: .whitespaces)
-            
-            if trimmed.lowercased().hasPrefix("cn=") {
-                let cn = String(trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces))
-                os_log("              ✓ CN (parsed): %{public}@", log: logger, type: .info, cn)
-                return cn
-            }
-        }
-        
-        let slashComponents = summary.components(separatedBy: "/")
-        for component in slashComponents {
-            let trimmed = component.trimmingCharacters(in: .whitespaces)
-            if trimmed.lowercased().hasPrefix("cn=") {
-                let cn = String(trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces))
-                os_log("              ✓ CN (slash-parsed): %{public}@", log: logger, type: .info, cn)
-                return cn
-            }
-        }
-        
-        return nil
-    }
 }
 
 // ============================================================================
@@ -839,7 +783,7 @@ extension MqttModule: CocoaMQTTDelegate {
             let duration = Date().timeIntervalSince(startTime)
             elapsed = String(format: " [+%.3fs]", duration)
         }
-        
+
         os_log("", log: logger, type: .info)
         os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
         os_log("║ DELEGATE: didReceive trust (TLS HANDSHAKE)           ║", log: logger, type: .info)
@@ -847,76 +791,23 @@ extension MqttModule: CocoaMQTTDelegate {
         os_log("║ Time: %{public}@", log: logger, type: .info, elapsed)
         os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
         os_log("", log: logger, type: .info)
-        
-        // STEP 1: Check if CN validation is required
-        os_log("  STEP 1: Checking expected CN...", log: logger, type: .info)
-        guard let expectedCN = self.expectedBrokerCN, !expectedCN.isEmpty else {
-            // Admin user — no CN pinning required, allow the connection
-            os_log("  - No expected CN configured (admin user) — skipping CN validation", log: logger, type: .info)
-            os_log("", log: logger, type: .info)
-            os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
-            os_log("║ TLS VALIDATION: SUCCESS ✓ (admin, CN check skipped) ║", log: logger, type: .info)
-            os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
-            os_log("", log: logger, type: .info)
-            completionHandler(true)
-            return
-        }
-        os_log("  ✓ Expected CN: %{public}@", log: logger, type: .info, expectedCN)
-        
-        // STEP 2: Pull the leaf cert off the trust object
-        os_log("  STEP 2: Retrieving server certificate...", log: logger, type: .info)
-        guard let serverCert = SecTrustGetCertificateAtIndex(trust, 0) else {
-            os_log("  ✗ Cannot retrieve server certificate", log: logger, type: .error)
-            completionHandler(false)
-            return
-        }
-        os_log("  ✓ Server certificate retrieved", log: logger, type: .info)
-        
-        if let summary = SecCertificateCopySubjectSummary(serverCert) as String? {
-            os_log("    - Server cert subject: %{public}@", log: logger, type: .info, summary)
-        }
-        
-        // STEP 3: Extract the CN from the server cert
-        os_log("  STEP 3: Extracting CN from server certificate...", log: logger, type: .info)
-        guard let actualCN = extractCommonName(from: serverCert) else {
-            os_log("  ✗ Cannot extract CN from server certificate", log: logger, type: .error)
-            completionHandler(false)
-            return
-        }
-        os_log("  ✓ Actual CN: %{public}@", log: logger, type: .info, actualCN)
-        
-        // STEP 4: Pin — compare extracted CN against the known device identifier
-        os_log("  STEP 4: Comparing CNs...", log: logger, type: .info)
-        os_log("    - Expected: '%{public}@'", log: logger, type: .info, expectedCN)
-        os_log("    - Actual:   '%{public}@'", log: logger, type: .info, actualCN)
-        
-        if actualCN != expectedCN {
-            os_log("  ✗ CN MISMATCH!", log: logger, type: .error)
-            os_log("", log: logger, type: .error)
-            os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .error)
-            os_log("║ TLS VALIDATION: FAILED ✗ (CN mismatch)              ║", log: logger, type: .error)
-            os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .error)
-            os_log("", log: logger, type: .error)
-            completionHandler(false)
-            return
-        }
-        os_log("  ✓ CN matches!", log: logger, type: .info)
-        
-        // CN pinning against the known device serial is the trust model here.
-        // SecTrustEvaluateWithError is intentionally not called: Apple enforces a
-        // 398-day max validity on leaf certs, but the broker cert is provisioned by
-        // gateway firmware (Penguin CA) with a longer validity we cannot control.
-        // The CN check against the expected device identifier is sufficient for a
-        // private-network IoT trust boundary.
-        
+
+        let trusted = evaluateServerTrust(trust, expectedCN: expectedBrokerCN, anchors: trustedRootCerts)
+
         os_log("", log: logger, type: .info)
-        os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
-        os_log("║ TLS VALIDATION: SUCCESS ✓ (CN pinned)               ║", log: logger, type: .info)
-        os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
+        os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: trusted ? .info : .error)
+        os_log("║ TLS VALIDATION: %{public}@", log: logger, type: trusted ? .info : .error, trusted ? "SUCCESS ✓" : "FAILED ✗")
+        os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: trusted ? .info : .error)
         os_log("", log: logger, type: .info)
-        completionHandler(true)
+        completionHandler(trusted)
     }
-    
+
+    /// Validates a server's TLS trust object. The logic lives in `TrustValidator` so it can be
+    /// unit-tested without React Native or CocoaMQTT; see `ios/TrustValidation/TrustValidator.swift`.
+    internal func evaluateServerTrust(_ trust: SecTrust, expectedCN: String?, anchors: [SecCertificate]) -> Bool {
+        return TrustValidator.evaluate(trust: trust, expectedCN: expectedCN, anchors: anchors, log: logger)
+    }
+
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {
         var elapsed = ""
         if let startTime = connectionStartTime {

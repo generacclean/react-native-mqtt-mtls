@@ -259,11 +259,16 @@ public class MqttModule extends ReactContextBaseJavaModule {
     // ============================================================================
 
     private static class CustomTrustManager implements X509TrustManager {
+        /** id-kp-serverAuth: the certificate may authenticate a TLS server. */
+        private static final String EKU_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
+
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
+        private final String expectedSniHost;
 
-        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN) throws Exception {
+        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost) throws Exception {
             this.expectedBrokerCN = expectedBrokerCN;
+            this.expectedSniHost = expectedSniHost;
 
             List<X509Certificate> certs = new ArrayList<>();
             Enumeration<String> aliases = trustStore.aliases();
@@ -282,7 +287,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
             if (expectedBrokerCN != null && !expectedBrokerCN.isEmpty()) {
                 Log.d(TAG, "Expected broker CN: " + expectedBrokerCN);
             } else {
-                Log.d(TAG, "Broker CN validation skipped (admin user)");
+                Log.d(TAG, "No expected broker CN configured — CN pin skipped");
+            }
+
+            if (expectedSniHost != null && !expectedSniHost.isEmpty()) {
+                Log.d(TAG, "Expected SNI host (SAN pin): " + expectedSniHost);
+            } else {
+                Log.d(TAG, "No expected SNI host configured — SAN pin skipped");
             }
         }
 
@@ -299,7 +310,18 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             X509Certificate serverCert = chain[0];
 
-            // CN validation only for non-admin users (expectedBrokerCN will be null for admin)
+            // Chain validation always runs, admin or not — isAdminUser only ever skips the
+            // CN/SNI pins below.
+            validateCertificateChain(chain);
+            Log.d(TAG, "✓ Server certificate chain validated via CertPathValidator (PKIX)");
+
+            // Also unconditional: PKIX says the leaf is genuine, not that it is a broker.
+            requireTlsServerCertificate(serverCert);
+
+            // Both pins below key off whether an expected value was configured, not off isAdminUser
+            // directly: admin mode nulls them, but a non-admin caller passing an empty string loses
+            // the pin the same way. The skip logs say which value was missing so a support engineer
+            // reading a device log is not told "admin" for a configuration bug.
             if (expectedBrokerCN != null && !expectedBrokerCN.isEmpty()) {
                 String brokerCN = extractCN(serverCert);
                 Log.d(TAG, "Broker certificate CN: " + brokerCN);
@@ -310,85 +332,234 @@ public class MqttModule extends ReactContextBaseJavaModule {
                             "Broker CN mismatch. Expected: " + expectedBrokerCN + ", Got: " + brokerCN);
                 }
                 Log.d(TAG, "✓ Broker CN validated: " + brokerCN);
+            } else {
+                Log.w(TAG, "No expected broker CN configured — CN pin skipped");
             }
 
-            boolean validated = false;
-
-            // Try direct validation (server cert signed by one of our CAs)
-            for (X509Certificate ca : acceptedIssuers) {
-                try {
-                    serverCert.verify(ca.getPublicKey());
-                    validated = true;
-                    Log.d(TAG, "Server certificate validated by: " + ca.getSubjectDN());
-                    break;
-                } catch (Exception e) {
-                    // Try next CA
+            if (expectedSniHost != null && !expectedSniHost.isEmpty()) {
+                if (!certificateMatchesHost(serverCert, expectedSniHost)) {
+                    Log.e(TAG, "SAN MISMATCH! No SAN entry on server certificate matches SNI host: " + expectedSniHost);
+                    throw new CertificateException(
+                            "Broker certificate SAN does not match SNI host: " + expectedSniHost);
                 }
+                Log.d(TAG, "✓ Broker certificate SAN matched SNI host: " + expectedSniHost);
+            } else {
+                Log.w(TAG, "No expected SNI host configured — SAN pin skipped");
             }
+        }
 
-            // Try validation via intermediate certificates
-            if (!validated && chain.length > 1) {
-                for (int i = 1; i < chain.length; i++) {
-                    X509Certificate intermediate = chain[i];
+        /**
+         * Validates the server's certificate chain against the configured trust anchors using
+         * the platform PKIX path validator (expiry, path-length, basic-constraints, and
+         * signature checks) instead of hand-rolled per-issuer signature loops.
+         */
+        private void validateCertificateChain(X509Certificate[] chain) throws CertificateException {
+            try {
+                Set<TrustAnchor> anchors = new HashSet<>();
+                for (X509Certificate ca : acceptedIssuers) {
+                    anchors.add(new TrustAnchor(ca, null));
+                }
+
+                if (anchors.isEmpty()) {
+                    throw new CertificateException("No trusted CA certificates configured");
+                }
+
+                // PKIX requires the path to end just below a trust anchor, not include it —
+                // drop any presented cert that IS one of our configured anchors.
+                List<X509Certificate> pathCerts = new ArrayList<>();
+                for (X509Certificate cert : chain) {
+                    boolean isAnchor = false;
                     for (X509Certificate ca : acceptedIssuers) {
-                        try {
-                            intermediate.verify(ca.getPublicKey());
-                            serverCert.verify(intermediate.getPublicKey());
-                            validated = true;
-                            Log.d(TAG, "Server certificate validated via intermediate");
+                        if (cert.equals(ca)) {
+                            isAnchor = true;
                             break;
-                        } catch (Exception e) {
-                            // Try next
                         }
                     }
-                    if (validated) break;
-                }
-            }
-
-            // Check if intermediate IS a trusted CA
-            if (!validated && chain.length > 1) {
-                for (int i = 1; i < chain.length; i++) {
-                    X509Certificate intermediate = chain[i];
-                    for (X509Certificate ca : acceptedIssuers) {
-                        if (intermediate.getSubjectDN().equals(ca.getSubjectDN())) {
-                            try {
-                                byte[] intermediatePubKey = intermediate.getPublicKey().getEncoded();
-                                byte[] caPubKey = ca.getPublicKey().getEncoded();
-
-                                if (Arrays.equals(intermediatePubKey, caPubKey)) {
-                                    serverCert.verify(intermediate.getPublicKey());
-                                    validated = true;
-                                    Log.d(TAG, "Server certificate validated by trusted intermediate");
-                                    break;
-                                }
-                            } catch (Exception e) {
-                                // Try next
-                            }
-                        }
+                    if (!isAnchor) {
+                        pathCerts.add(cert);
                     }
-                    if (validated) break;
                 }
+
+                if (pathCerts.isEmpty()) {
+                    throw new CertificateException("Server sent no leaf certificate to validate");
+                }
+
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                CertPath certPath = cf.generateCertPath(pathCerts);
+
+                PKIXParameters params = new PKIXParameters(anchors);
+                // No CRL/OCSP infrastructure for the Penguin gateway CA on a private network;
+                // expiry, path-length, and basic-constraints checks still run.
+                params.setRevocationEnabled(false);
+
+                CertPathValidator validator = CertPathValidator.getInstance("PKIX");
+                validator.validate(certPath, params);
+            } catch (CertificateException e) {
+                throw e;
+            } catch (Exception e) {
+                Log.e(TAG, "Certificate chain validation failed", e);
+                throw new CertificateException("Server certificate chain validation failed: " + e.getMessage(), e);
+            }
+        }
+
+        /**
+         * Requires the leaf to assert id-kp-serverAuth explicitly, and rejects it otherwise.
+         *
+         * PKIX checks signatures, validity dates, path length, and basic constraints, but not the
+         * leaf's purpose. Every device holds a *client* certificate from the same gateway CA, so
+         * without this check one of those would pass as the broker whenever the CN and SAN pins
+         * are skipped — which is every production connection today, since the app forces admin
+         * mode. This is the check iOS gets from SecPolicyCreateSSL(true, nil).
+         *
+         * Two cases are rejected for parity with that iOS policy rather than because PKIX asks
+         * for it. A leaf with no extendedKeyUsage extension at all is unconstrained as far as
+         * RFC 5280 is concerned, and a leaf asserting anyExtendedKeyUsage (2.5.29.37.0) claims
+         * every purpose — but Apple's SSL policy rejects both with "Extended key usage does not
+         * match certificate usage", so a broker that presents either cannot be reached from the
+         * iOS build today and accepting it here would be an Android-only relaxation.
+         */
+        private void requireTlsServerCertificate(X509Certificate leaf) throws CertificateException {
+            List<String> purposes;
+            try {
+                purposes = leaf.getExtendedKeyUsage();
+            } catch (CertificateParsingException e) {
+                throw new CertificateException(
+                        "Cannot parse the extendedKeyUsage extension on the broker certificate", e);
             }
 
-            if (!validated) {
-                Log.e(TAG, "Server certificate validation failed - not trusted by any CA");
-                throw new CertificateException("Server certificate not trusted by any configured CA");
+            if (purposes == null) {
+                Log.e(TAG, "EKU MISSING! Certificate declares no extended key usage, so it does not "
+                        + "assert TLS server authentication");
+                throw new CertificateException(
+                        "Broker certificate declares no extended key usage; it is not a TLS server "
+                                + "certificate");
             }
+
+            if (purposes.contains(EKU_SERVER_AUTH)) {
+                Log.d(TAG, "✓ Broker certificate is valid for TLS server authentication");
+                return;
+            }
+
+            Log.e(TAG, "EKU MISMATCH! Certificate is not a TLS server certificate: " + purposes);
+            throw new CertificateException(
+                    "Broker certificate is not valid for TLS server authentication. "
+                            + "Extended key usage: " + purposes);
+        }
+
+        /**
+         * Checks whether any DNS or IP subjectAltName entry on the certificate matches the
+         * expected SNI host exactly (no wildcard matching — this is a private IoT trust boundary).
+         *
+         * Returns false only for a genuine mismatch. An unparseable or absent SAN extension
+         * throws instead, so the three ways this check can fail do not collapse into one
+         * "SAN does not match" message and send the installer after the wrong problem.
+         */
+        private boolean certificateMatchesHost(X509Certificate cert, String sniHost)
+                throws CertificateException {
+            Collection<List<?>> sans;
+            try {
+                sans = cert.getSubjectAlternativeNames();
+            } catch (CertificateParsingException e) {
+                throw new CertificateException(
+                        "Cannot parse the subjectAltName extension on the broker certificate", e);
+            }
+            if (sans == null) {
+                throw new CertificateException(
+                        "Broker certificate has no subjectAltName extension, so it cannot be bound "
+                        + "to SNI host: " + sniHost);
+            }
+            for (List<?> san : sans) {
+                Integer type = (Integer) san.get(0);
+                Object value = san.get(1);
+                // Per the X509Certificate#getSubjectAlternativeNames javadoc, GeneralName
+                // type 2 (dNSName) and type 7 (iPAddress) are both returned as Strings —
+                // IPv4 in dotted-quad notation, IPv6 as colon-separated hex groups.
+                // Only otherName/x400Address/ediPartyName/unrecognized types use byte[], so
+                // there is no byte[] branch here: it would be unreachable and untested.
+                if ((type == 2 || type == 7) && value instanceof String
+                        && ((String) value).equalsIgnoreCase(sniHost)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private String extractCN(X509Certificate cert) {
             try {
-                String dn = cert.getSubjectX500Principal().getName();
-                for (String part : dn.split(",")) {
-                    String trimmed = part.trim();
-                    if (trimmed.startsWith("CN=")) {
-                        return trimmed.substring(3);
-                    }
-                }
+                return cnFromDn(cert.getSubjectX500Principal().getName());
             } catch (Exception e) {
                 Log.e(TAG, "Failed to extract CN from certificate", e);
+                return null;
+            }
+        }
+
+        /**
+         * Reads the CN attribute out of an RFC 2253 distinguished name.
+         *
+         * A plain {@code dn.split(",")} is wrong here: RFC 2253 escapes a comma inside an attribute
+         * value as {@code \,}, so {@code CN=Acme\, Inc,O=Acme} splits into two RDNs and the CN comes
+         * back truncated to {@code Acme\}. Since this value is compared against the expected broker
+         * CN, a truncated read is a failed pin rather than a cosmetic bug. Splitting on unescaped
+         * separators only, then unescaping the value, handles it. javax.naming.ldap.LdapName would
+         * do this properly but is not available on Android.
+         */
+        static String cnFromDn(String dn) {
+            if (dn == null) {
+                return null;
+            }
+            for (String rdn : splitOnUnescapedSeparators(dn)) {
+                String trimmed = rdn.trim();
+                // Attribute types are case-insensitive per RFC 4519.
+                if (trimmed.regionMatches(true, 0, "CN=", 0, 3)) {
+                    return unescapeDnValue(trimmed.substring(3));
+                }
             }
             return null;
+        }
+
+        /**
+         * Splits a DN on the two separators RFC 2253 defines: {@code ,} between RDNs and {@code +}
+         * between the attributes of a multi-valued RDN. Without the {@code +} case,
+         * {@code CN=broker.local+OU=field} yields one part whose value reads
+         * {@code broker.local+OU=field} and the CN pin fails on a certificate that should match.
+         */
+        private static List<String> splitOnUnescapedSeparators(String dn) {
+            List<String> parts = new ArrayList<>();
+            StringBuilder current = new StringBuilder();
+            boolean escaped = false;
+            for (int i = 0; i < dn.length(); i++) {
+                char c = dn.charAt(i);
+                if (escaped) {
+                    current.append(c);
+                    escaped = false;
+                } else if (c == '\\') {
+                    current.append(c);
+                    escaped = true;
+                } else if (c == ',' || c == '+') {
+                    parts.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
+            }
+            parts.add(current.toString());
+            return parts;
+        }
+
+        /** Drops the backslashes RFC 2253 uses to escape special characters within a value. */
+        private static String unescapeDnValue(String value) {
+            StringBuilder unescaped = new StringBuilder(value.length());
+            boolean escaped = false;
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (!escaped && c == '\\') {
+                    escaped = true;
+                } else {
+                    unescaped.append(c);
+                    escaped = false;
+                }
+            }
+            return unescaped.toString();
         }
 
         @Override
@@ -526,6 +697,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     certificates.getString("rootCa"),
                     privateKeyAlias,
                     effectiveBrokerCN,  // null for admin — skips CN validation
+                    effectiveSniHost,   // null for admin — skips SNI/SAN pin (chain validation still runs)
                     keystorePath,
                     keystorePassword,
                     keystoreFormat);
@@ -625,6 +797,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String rootPem,
             String privateKeyAlias,
             String expectedBrokerCN,
+            String expectedSniHost,
             String keystorePath,
             String keystorePassword,
             String keystoreFormat) throws Exception {
@@ -686,8 +859,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
         };
 
         // Setup TrustManager
-        // expectedBrokerCN is null for admin users — CN validation is skipped,
-        // but certificate chain validation still runs for security
+        // expectedBrokerCN/expectedSniHost are null for admin users — CN and SNI/SAN pinning
+        // are skipped, but certificate chain validation (via CertPathValidator) always runs
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         trustStore.load(null, null);
         int i = 0;
@@ -696,7 +869,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         TrustManager[] trustManagers = new TrustManager[] {
-                new CustomTrustManager(trustStore, expectedBrokerCN)
+                new CustomTrustManager(trustStore, expectedBrokerCN, expectedSniHost)
         };
 
         // Create SSL context with TLS 1.3
@@ -1018,16 +1191,102 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Directories the software keystore may legitimately live in, in preference order.
+     *
+     * react-native-ecc-csr 1.4.0+ writes the keystore to getNoBackupFilesDir() so the private key is
+     * excluded from Android Auto Backup unconditionally; earlier versions used getFilesDir(). Both
+     * are app-private, so both are accepted - and filesDir has to stay accepted because a device
+     * that has not yet run the ecc-csr migration still has its keystore there.
+     */
+    private List<File> keystoreRoots() {
+        List<File> roots = new ArrayList<>();
+        File noBackupDir = getReactApplicationContext().getNoBackupFilesDir();
+        if (noBackupDir != null) {
+            roots.add(noBackupDir);
+        }
+        File filesDir = getReactApplicationContext().getFilesDir();
+        if (filesDir != null) {
+            roots.add(filesDir);
+        }
+        return roots;
+    }
+
+    /**
+     * Resolves the keystore location, tolerating both storage generations.
+     *
+     * - Absolute path that exists: used verbatim.
+     * - Absolute path that does not exist: retried by filename under each root. This is what makes
+     *   the ecc-csr no-backup move invisible to the app. The installer persists keystorePath across
+     *   launches, so right after upgrading it hands us a files/ path for a file ecc-csr has already
+     *   moved to no_backup/; without this retry the first post-upgrade connect fails.
+     * - Relative path or default: resolved against each root in order.
+     *
+     * @param roots the keystore roots to resolve against; the caller passes the same list to
+     *              {@link #isInsideKeystoreRoot(File, List)} so resolution and containment cannot
+     *              disagree about which directories are legitimate
+     * @return the first candidate that exists, or the preferred candidate when none do, so the
+     *         caller's not-found error names the location the keystore is supposed to be in
+     */
+    private File resolveKeystoreFile(String filename, List<File> roots) {
+        List<File> candidates = new ArrayList<>();
+        File supplied = new File(filename);
+        if (supplied.isAbsolute()) {
+            candidates.add(supplied);
+            for (File root : roots) {
+                candidates.add(new File(root, supplied.getName()));
+            }
+        } else {
+            for (File root : roots) {
+                candidates.add(new File(root, filename));
+            }
+        }
+        if (candidates.isEmpty()) {
+            return supplied;
+        }
+        for (File candidate : candidates) {
+            if (candidate.exists()) {
+                return candidate;
+            }
+        }
+        return candidates.get(0);
+    }
+
+    /**
+     * Whether the resolved keystore path sits inside one of the app-private keystore roots.
+     *
+     * @param roots must be the same list used to resolve {@code keystoreFile}. getNoBackupFilesDir()
+     *              can in principle return null, and re-deriving the roots here would let a path
+     *              resolved into no_backup/ be rejected by a containment check that no longer knows
+     *              about that directory.
+     */
+    private boolean isInsideKeystoreRoot(File keystoreFile, List<File> roots) throws IOException {
+        String canonicalKeystorePath = keystoreFile.getCanonicalPath();
+        for (File root : roots) {
+            if (canonicalKeystorePath.startsWith(root.getCanonicalPath() + File.separator)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Loads software keystore with dual-format support for migration compatibility.
      *
      * Supports both:
      * 1. Encrypted PKCS12 (new format) - written by react-native-ecc-csr with EncryptedFile
      * 2. Plain PKCS12 (legacy format) - written by older CSR module versions
      *
-     * This addresses PR #4 reviewer Blocker B by making the keystore contract explicit.
-     * The path, password, and format are now API parameters instead of hidden filesystem conventions.
+     * The path, password, and format are API parameters rather than hidden filesystem conventions,
+     * so the keystore contract between this module and the CSR module is explicit.
      *
-     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE)
+     * The plain-PKCS12 branch is a migration bridge, not a supported format: it exists so a device
+     * that provisioned its key before ecc-csr wrote EncryptedFile keystores keeps connecting after
+     * an app upgrade. Those keystores are never rewritten in place, so the branch cannot be removed
+     * until every device in the field has re-provisioned; drop it when that is confirmed rather
+     * than on a chosen version.
+     *
+     * @param keystorePath Path to keystore file, or null to use default (SOFTWARE_KEYSTORE_FILE);
+     *                     see {@link #resolveKeystoreFile(String, List)} for how it is resolved
      * @param keystorePassword Password for keystore, or null to use empty string
      * @param keystoreFormat Format hint: "pkcs12", "encrypted", or null for auto-detect
      * @return KeyStore loaded from the specified keystore file
@@ -1038,14 +1297,24 @@ public class MqttModule extends ReactContextBaseJavaModule {
         String filename = (keystorePath != null && !keystorePath.isEmpty()) ? keystorePath : SOFTWARE_KEYSTORE_FILE;
         String password = (keystorePassword != null) ? keystorePassword : "";
 
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), filename);
+        // Resolved once and shared: resolution and the containment check below must agree on which
+        // directories count as app-private, and getNoBackupFilesDir() is not guaranteed to return
+        // the same value on two separate calls.
+        List<File> roots = keystoreRoots();
+        File keystoreFile = resolveKeystoreFile(filename, roots);
+
+        // Containment check: the resolved path must stay within app-private storage, even for
+        // absolute paths supplied across the RN bridge. Checked after resolution so neither the
+        // caller-supplied path nor the no-backup fallback can escape via "..".
+        if (!isInsideKeystoreRoot(keystoreFile, roots)) {
+            throw new KeyException("Keystore path must be inside app-private storage: " + keystoreFile.getCanonicalPath());
+        }
 
         // Check if keystore file exists
         if (!keystoreFile.exists()) {
             throw new KeyException(
-                "Software keystore not found: " + filename +
-                ". Ensure CSR module has run and created the keystore file. " +
-                "Expected location: " + keystoreFile.getAbsolutePath()
+                "Software keystore not found: " + keystoreFile.getAbsolutePath() +
+                ". Ensure CSR module has run and created the keystore file."
             );
         }
 
@@ -1080,7 +1349,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
         keyStore = tryLoadPlainKeyStore(keystoreFile, password);
         if (keyStore != null) {
             Log.d(TAG, "Loaded plain PKCS12 keystore successfully (legacy format)");
-            Log.w(TAG, "Consider updating CSR module to use encrypted keystore format");
+            // States what is true of this device rather than asking the reader to act: this line
+            // lands in a field installer's device log, and only an app developer can change which
+            // format react-native-ecc-csr writes. Phrase it as a finding they can grep for.
+            Log.w(TAG, "Keystore is plain PKCS12, not EncryptedFile — the private key is protected "
+                + "only by app-private storage, without Android Keystore-backed file encryption");
             return keyStore;
         }
 

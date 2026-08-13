@@ -254,7 +254,11 @@ The `isAdminUser` configuration option controls certificate verification behavio
 #### **Default: `false` (Secure-by-Default - Recommended for Production)**
 
 When `isAdminUser` is `false` (or omitted), the library enforces **full certificate verification**:
-- ✅ SNI hostname verification (requires `sniHostname` in config)
+- ✅ SNI hostname verification, **Android only** (requires `sniHostname` in config): the value is
+  matched against the broker certificate's subjectAltName entries (DNS and iPAddress, exact match,
+  no wildcards). On iOS `sniHostname` is only announced as the TLS SNI hostname — trust evaluation
+  uses `SecPolicyCreateSSL(true, nil)` with no hostname, so no SAN check runs there and
+  `brokerCommonName` is the only iOS identity pin.
 - ✅ Broker Common Name pinning (requires `brokerCommonName` in config)
 - ✅ Complete TLS handshake validation
 - ✅ Protection against man-in-the-middle attacks

@@ -4,6 +4,12 @@
  *
  * IMPORTANT: These tests exercise the real isBinaryData(topic:data:) method
  * from MqttModule using topic-based detection logic.
+ *
+ * NOT CURRENTLY EXECUTED. MqttModule depends on React and CocoaMQTT, so compiling these needs an
+ * Xcode target inside a host app that supplies those pods; this repo has none, and `npm run
+ * test:ios` exits non-zero to say so. Treat them as a spec awaiting a target, not as coverage.
+ * Server-trust validation deliberately does not live here — it sits in TrustValidationTests, which
+ * `swift test` runs on every push, because that logic is the security-critical part.
  */
 
 import XCTest
@@ -245,8 +251,8 @@ class MqttModuleTests: XCTestCase {
             invokeCount += 1
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["result"])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["result"])
 
         XCTAssertEqual(invokeCount, 1, "Callback should be invoked once")
     }
@@ -257,22 +263,22 @@ class MqttModuleTests: XCTestCase {
             invokeCount += 1
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["result1"])
-        guard.invoke(["result2"])
-        guard.invoke(["result3"])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["result1"])
+        guardObj.invoke(["result2"])
+        guardObj.invoke(["result3"])
 
         XCTAssertEqual(invokeCount, 1, "Callback should only be invoked once")
     }
 
     func testCallbackGuard_NilCallbackHandling() {
-        let guard = CallbackGuard(nil)
+        // There is nothing observable to assert on a nil callback: the guard's only job here is to
+        // not unwrap it. The failure mode is a trap, which fails the test on its own, so this case
+        // carries no assertion rather than a vacuous one that would pass even if invoke() started
+        // force-unwrapping.
+        let guardObj = CallbackGuard(nil)
 
-        // Should not crash with nil callback
-        guard.invoke(["result"])
-
-        // Test passes if no crash occurs
-        XCTAssertTrue(true, "Should handle nil callback gracefully")
+        guardObj.invoke(["result"])
     }
 
     func testCallbackGuard_ThreadSafety() {
@@ -286,14 +292,14 @@ class MqttModuleTests: XCTestCase {
             lock.unlock()
         }
 
-        let guard = CallbackGuard(callback)
+        let guardObj = CallbackGuard(callback)
         let group = DispatchGroup()
 
         // Create 10 concurrent invocations
         for _ in 0..<10 {
             group.enter()
             DispatchQueue.global().async {
-                guard.invoke(["result"])
+                guardObj.invoke(["result"])
                 group.leave()
             }
         }
@@ -312,8 +318,8 @@ class MqttModuleTests: XCTestCase {
             receivedArgs = args
         }
 
-        let guard = CallbackGuard(callback)
-        guard.invoke(["test-result", 42, true])
+        let guardObj = CallbackGuard(callback)
+        guardObj.invoke(["test-result", 42, true])
 
         XCTAssertEqual(receivedArgs.count, 3, "Should receive all arguments")
         XCTAssertEqual(receivedArgs[0] as? String, "test-result")
@@ -327,11 +333,11 @@ class MqttModuleTests: XCTestCase {
             fatalError("Test error")
         }
 
-        let guard = CallbackGuard(callback)
+        let guardObj = CallbackGuard(callback)
 
         // In Swift, we can't easily test fatalError, but we can test
         // that the guard marks the callback as fired even if it would throw
-        guard.invoke(["result"])
+        guardObj.invoke(["result"])
 
         // Second invocation should be suppressed
         var secondCallbackInvoked = false
