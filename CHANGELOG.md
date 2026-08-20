@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-08-19
+
+### Fixed
+
+- **Android could not reconnect after an ungraceful disconnect ("Client is closed", 32111)**
+  - Every connect after the transport died — airplane mode toggled on and off, or the device leaving
+    range of the gateway's access point — failed instantly with `Client is closed (32111)` thrown
+    from `MqttAsyncClient.connect`, before any socket was opened. Certificates, keystore, and the
+    TLS 1.3 context all built successfully; the client instance behind the connection was simply
+    already closed. Nothing recovered it short of the user force-quitting the app, because the
+    stranded instance lived in a service that dies only with the process.
+  - Root cause: `MqttService` keys a cache of `MqttConnection` instances by
+    `serverURI:clientId:packageName` and hands the cached instance to every `MqttAndroidClient`
+    built from those same three values. `MqttService.disconnect()` removes the entry;
+    `MqttService.close()` closes the underlying `MqttAsyncClient` and leaves the entry in place.
+    Teardown only disconnected when `isConnected()` was true and closed unconditionally, so an
+    ungraceful drop — where the client is already not connected — took the close-only path and
+    stranded a permanently closed client under the handle the next connect resolves to. Consumers
+    reuse a persisted `clientId` against a fixed broker URL precisely so the broker can queue
+    messages across reconnects, which guarantees the same handle is resolved every time.
+  - Teardown now always disconnects, whatever `isConnected()` reports, and never closes.
+    `MqttConnection.disconnect()` tolerates a client that was never connected (it reports an error
+    status rather than throwing) and the handle is evicted either way. `close()` is not called at
+    all: after the disconnect the handle is gone, so it could only log an invalid-handle error.
+    Nothing is left for it to release either — `MqttAsyncClient` opens its file persistence in its
+    constructor and closes it again on the next line, taking the lock back only on connect, and
+    `MqttDefaultFilePersistence.open()` swallows a lock failure anyway.
+  - Teardown now also calls `unregisterResources()`, which releases the `BroadcastReceiver`
+    registration and the bound service. `close()` released neither, so every teardown leaked both.
+  - Teardown now runs when React Native destroys the module, via `invalidate()` and
+    `onCatalystInstanceDestroy()`. The two are alternatives picked by the runtime, not a chain: below
+    0.69 only the latter exists, on 0.83 `BaseJavaModule.invalidate()` is empty so only the former
+    fires, and on the 0.71 this module compiles against `invalidate()` still delegates to
+    `onCatalystInstanceDestroy()` so both do — which is why teardown has to be idempotent.
+    A JS reload drops the module while
+    `MqttService` keeps running, and it is the one teardown the app cannot request for itself, so
+    without it a reload left the receiver registered, the service bound and the handle cached. The
+    constructor no longer attempts a teardown: `client` is an instance field, always null in a fresh
+    module, so that call could only return at its first check.
+  - A connect that still fails with `REASON_CODE_CLIENT_CLOSED`, `REASON_CODE_CLIENT_CONNECTED` or
+    `REASON_CODE_CLIENT_DISCONNECTING` now evicts its handle instead of leaving it for the next
+    attempt to trip over. `ClientComms.connect()` throws all three from the same block, and none can
+    be recovered by retrying against the same cached connection — `CLIENT_DISCONNECTING` is
+    transient in plain Paho, where `shutdownConnection()` moves the state on to `DISCONNECTED`, but
+    not here, because `MqttService.disconnect()` drops the map entry the moment it is called while
+    the underlying disconnect is still running. `REASON_CODE_CONNECT_IN_PROGRESS` is deliberately
+    excluded: it resolves on its own, and evicting there would tear down a healthy attempt.
+  - A connect that throws after its client was installed now tears that client down instead of
+    leaving a client that has already registered its receiver and bound the service for the next
+    connect to overwrite.
+  - A callback arriving after a new connection has replaced the client no longer tears down that
+    replacement. Every teardown outside `invalidate()` now names the client it was issued for rather
+    than reading whichever is current, because reading the field twice — once to check, once to tear
+    down — was the whole problem: a `connect()` on the bridge thread can install a new client between
+    the two reads. `releaseClientResources()` releases the receiver and binding of the client it is
+    given and only forgets the field if that client is still the one in it.
+  - `cleanupConnection(MqttAndroidClient)` issues its disconnect only while the client it was given is
+    still the current one, since a client does not own its handle.
+    `MqttAndroidClient.disconnect()` passes nothing but its handle string to the service, which
+    resolves it against whichever `MqttConnection` is cached under it now — and a replacement built
+    from the same broker URL and `clientId` shares that string. Issued from a stale client it would
+    drop the replacement's live session and remove the entry the replacement still needs, after which
+    every call on it throws `IllegalArgumentException("Invalid ClientHandle")`. Skipping it strands
+    nothing, because the replacement owns the handle and evicts it in its own teardown. The check
+    holds the same lock as the install in `connect()`, and holds it across the disconnect, so no
+    client can be installed between the two; `volatile` alone would have given visibility without
+    atomicity. That is safe because nothing in the call blocks or re-enters the module — Paho
+    publishes its status with `Context.sendBroadcast()`, delivered later on the main-thread looper.
+  - iOS is unaffected: CocoaMQTT holds its client directly, with no service-owned cache.
+
 ## [1.4.0] - 2026-08-12
 
 > A minor bump rather than a patch: the public API is unchanged, but Android now rejects server
@@ -12,15 +82,17 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **Server-certificate trust validation on Android and iOS**
+
   - **Android**: `CustomTrustManager.checkServerTrusted` validated the chain via hand-rolled per-issuer signature loops with no expiry check and no hostname/SAN matching, so a certificate validly issued by a trusted CA for one host was accepted when connecting to a different host, and expired certificates were accepted. Replaced with the platform `CertPathValidator` ("PKIX"), which enforces expiry, path-length, and basic-constraints, and added SAN matching against the expected SNI host.
   - **iOS**: `didReceive(trust:)` accepted any server certificate unconditionally in admin mode, and only did a CN string comparison otherwise — the app-provided root CA bundle was parsed but never evaluated against the presented chain. Now validates the chain via `SecTrustEvaluateWithError` against app-provided anchors unconditionally; admin mode only skips the CN pin, never chain validation.
   - On both platforms, chain validation always runs; identity pinning is skipped only when no expected value is configured (admin mode). The two platforms do not pin the same thing: Android matches the presented certificate's SANs (DNS and iPAddress) against the expected SNI host in addition to comparing CN, while iOS still only compares CN. `SecPolicyCreateSSL(true, nil)` is created without a hostname, so iOS performs no SAN check — closing that gap is tracked separately.
-  - Both platforms now require the leaf to be a TLS server certificate, and this closes the EKU asymmetry the 1.3.x notes recorded as a known gap. iOS gets the check from `SecPolicyCreateSSL(true, nil)`; Android checks `getExtendedKeyUsage()` directly, because bare `PKIXParameters` validates that a certificate is genuine, not what it is for. Without it, a device's own *client* certificate from the same CA — every device holds one — would be accepted as the broker whenever the CN and SAN pins are skipped, which is every production connection today.
+  - Both platforms now require the leaf to be a TLS server certificate, and this closes the EKU asymmetry the 1.3.x notes recorded as a known gap. iOS gets the check from `SecPolicyCreateSSL(true, nil)`; Android checks `getExtendedKeyUsage()` directly, because bare `PKIXParameters` validates that a certificate is genuine, not what it is for. Without it, a device's own _client_ certificate from the same CA — every device holds one — would be accepted as the broker whenever the CN and SAN pins are skipped, which is every production connection today.
   - Android requires `id-kp-serverAuth` (1.3.6.1.5.5.7.3.1) to be present explicitly. Two cases are rejected for parity with Apple's policy rather than because RFC 5280 demands it: a leaf with no `extendedKeyUsage` extension at all (unconstrained per RFC 5280) and a leaf asserting only `anyExtendedKeyUsage` (2.5.29.37.0). `SecPolicyCreateSSL(true, nil)` fails both with "Extended key usage does not match certificate usage", verified against the Security framework in `TrustValidatorTests` (`testLeafWithNoExtendedKeyUsage_Rejected`, `testLeafWithAnyExtendedKeyUsage_Rejected`, with a `serverAuth` control), so accepting either on Android would be a one-platform relaxation for a broker the iOS build cannot reach anyway.
   - What chain validation still does not check: revocation is off on both platforms (`params.setRevocationEnabled(false)` on Android; iOS does not opt in), because the private gateway CA publishes no CRL or OCSP responder, so a revoked broker certificate is accepted until it expires.
   - Residual risk, accepted: the installer app passes `isAdminUser: true` on every connection, so `expectedBrokerCN` and `expectedSniHost` are null in production and neither the CN nor the SAN pin runs today. What this release buys in production is chain validation — expiry, path length, basic constraints, and a signature chain to an app-provided anchor — which previously did not run at all on iOS. Any certificate issued by the trusted CA is still accepted for any host until the app stops forcing admin mode.
 
 - **Handle absolute keystore paths from ecc-csr 1.4.0+ (Issue #21)**
+
   - `loadSoftwareKeyStore()` now uses `File.isAbsolute()` to distinguish absolute paths (used directly) from relative paths (resolved against `filesDir`)
   - Fixes path doubling bug where absolute paths like `/data/user/0/com.app/files/software_keys.p12` were incorrectly prepended with `filesDir`, resulting in `/data/user/0/com.app/files/data/user/0/com.app/files/software_keys.p12`
   - Backward compatible: relative paths, null, and empty defaults behave unchanged
@@ -28,6 +100,7 @@ All notable changes to this project will be documented in this file.
   - Resolved keystore paths (absolute or relative) are now checked to remain inside app-private storage before being opened
 
 - **Load the keystore from `getNoBackupFilesDir()` (ecc-csr 1.4.0+)**
+
   - react-native-ecc-csr 1.4.0 moved the software keystore from `getFilesDir()` to `getNoBackupFilesDir()` so the private key is excluded from Android Auto Backup unconditionally, instead of depending on the consuming app's `fullBackupContent`/`dataExtractionRules` configuration
   - `loadSoftwareKeyStore()` now resolves relative/default paths against `getNoBackupFilesDir()` first and falls back to `getFilesDir()`, so devices that have not yet run the ecc-csr migration keep working
   - An absolute path that no longer exists is retried by filename under both directories. The installer persists `keystorePath` across launches, so immediately after upgrading it supplies a `files/` path for a keystore ecc-csr has already moved; without this fallback the first post-upgrade connect would fail
