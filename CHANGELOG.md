@@ -31,8 +31,12 @@ All notable changes to this project will be documented in this file.
     `MqttDefaultFilePersistence.open()` swallows a lock failure anyway.
   - Teardown now also calls `unregisterResources()`, which releases the `BroadcastReceiver`
     registration and the bound service. `close()` released neither, so every teardown leaked both.
-  - Teardown now runs when React Native destroys the module (`invalidate()`, or
-    `onCatalystInstanceDestroy()` on React Native below 0.69). A JS reload drops the module while
+  - Teardown now runs when React Native destroys the module, via `invalidate()` and
+    `onCatalystInstanceDestroy()`. The two are alternatives picked by the runtime, not a chain: below
+    0.69 only the latter exists, on 0.83 `BaseJavaModule.invalidate()` is empty so only the former
+    fires, and on the 0.71 this module compiles against `invalidate()` still delegates to
+    `onCatalystInstanceDestroy()` so both do — which is why teardown has to be idempotent.
+    A JS reload drops the module while
     `MqttService` keeps running, and it is the one teardown the app cannot request for itself, so
     without it a reload left the receiver registered, the service bound and the handle cached. The
     constructor no longer attempts a teardown: `client` is an instance field, always null in a fresh
@@ -48,11 +52,14 @@ All notable changes to this project will be documented in this file.
   - A connect that throws after its client was installed now tears that client down instead of
     leaving a client that has already registered its receiver and bound the service for the next
     connect to overwrite.
-  - A disconnect callback arriving after a new connection has replaced the client no longer tears
-    down that replacement — the callback releases the instance it was issued for. That
-    compare-and-clear holds the same lock as the install in `connect()`, so a new client cannot be
-    installed between the two halves of it; `volatile` alone would have given visibility without
-    atomicity.
+  - A callback arriving after a new connection has replaced the client no longer tears down that
+    replacement. Every teardown outside `invalidate()` now names the client it was issued for rather
+    than reading whichever is current: `cleanupConnection(MqttAndroidClient)` disconnects the client
+    it is given, and `releaseClientResources()` only forgets the field if that client is still the one
+    in it. Reading the field twice — once to check, once to tear down — was the whole problem, since a
+    `connect()` on the bridge thread can install a new client between the two reads. The remaining
+    compare-and-clear holds the same lock as the install in `connect()`, so nothing can be installed
+    between its two halves either; `volatile` alone would have given visibility without atomicity.
   - iOS is unaffected: CocoaMQTT holds its client directly, with no service-owned cache.
 
 ## [1.4.0] - 2026-08-12

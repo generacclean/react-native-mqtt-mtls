@@ -170,10 +170,24 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Pre-0.69 equivalent of {@link #invalidate()}. React Native 0.69+ calls invalidate(), whose
-     * default implementation delegates here; older versions call this directly. cleanupConnection()
-     * is idempotent — it returns at its first check once the client is forgotten — so a runtime that
-     * calls both tears down once.
+     * The pre-0.69 equivalent of {@link #invalidate()}, kept because peerDependencies still allows
+     * React Native 0.60, where invalidate() does not exist and this is the only hook that fires.
+     *
+     * The two are alternatives picked by the runtime, not a chain, and which of them fires depends
+     * on the version:
+     *   - below 0.69: invalidate() does not exist, so React Native calls this directly.
+     *   - 0.83 (what installer-app runs): BaseJavaModule.invalidate() is an empty body, so only
+     *     invalidate() fires and this override is dead.
+     *   - the 0.71 this module compiles against sits between the two: BaseJavaModule.invalidate()
+     *     still delegates here, so both fire.
+     *
+     * That last case is why cleanupConnection() has to be idempotent — it returns at its first check
+     * once the client is forgotten, so a runtime that calls both still tears down once.
+     *
+     * NativeModule.onCatalystInstanceDestroy() is a default method marked forRemoval, so this
+     * @Override only compiles while build.gradle pins compileOnly react-android 0.71.0. If that pin
+     * is ever raised past the removal, delete this method rather than the @Override — on any runtime
+     * new enough to have dropped it, invalidate() is the hook that fires.
      */
     @Override
     @SuppressWarnings("deprecation")
@@ -241,7 +255,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Tears down the current client and evicts its handle from the Paho Android service.
+     * Tears down whichever client is current. Use {@link #cleanupConnection(MqttAndroidClient)}
+     * instead from anywhere that already knows which client it means — a callback, for instance,
+     * which may be running after its client was replaced. "Whatever is current" is only the right
+     * target for teardown that is not tied to one attempt, such as {@link #invalidate()}.
+     */
+    private void cleanupConnection() {
+        cleanupConnection(client);
+    }
+
+    /**
+     * Tears down the given client and evicts its handle from the Paho Android service.
      *
      * The service keeps a map of MqttConnection instances keyed by
      * "serverURI:clientId:packageName", and hands the cached instance to every MqttAndroidClient
@@ -264,10 +288,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * lock back only on connect, and MqttDefaultFilePersistence.open() swallows a lock failure
      * anyway, so the next client is never waiting on this one.
      */
-    private void cleanupConnection() {
+    private void cleanupConnection(MqttAndroidClient staleClient) {
         Log.d(TAG, "Cleaning up MQTT connection state...");
-
-        final MqttAndroidClient staleClient = client;
 
         if (staleClient == null) {
             Log.d(TAG, "  - No active client to clean up");
@@ -898,10 +920,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     }
 
                     // Nothing this client does can recover an unusable cached connection, so evict
-                    // its handle now and let the next attempt build a fresh one.
-                    if (isUnusableClientFailure(exception) && client == attemptClient) {
+                    // its handle now and let the next attempt build a fresh one. Named explicitly
+                    // rather than via "whatever is current": this runs on the main thread, off Paho's
+                    // broadcast, so a connect() on the bridge thread can have installed a newer
+                    // client by now, and that one must not be torn down by this attempt's failure.
+                    if (isUnusableClientFailure(exception)) {
                         Log.w(TAG, "Client handle is unusable, evicting it so the next attempt starts clean");
-                        cleanupConnection();
+                        cleanupConnection(attemptClient);
                     }
 
                     safeInvoke(error, callbackFired, errorMessage);
@@ -913,6 +938,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
             // Anything thrown after the client was installed leaves a client that has already
             // registered its receiver and bound the service, and whose handle is cached. The next
             // connect() would clear the field without releasing any of that, so release it here.
+            //
+            // Untargeted is safe here, unlike in the onFailure above: this runs on the bridge thread,
+            // the only thread that installs a client, and @ReactMethod dispatch is serialized, so no
+            // newer client can exist yet. Paho's callbacks only ever clear the field, never install.
             cleanupConnection();
             safeInvoke(error, callbackFired, e.getMessage() != null ? e.getMessage() : "Setup failed");
         }
@@ -1135,17 +1164,19 @@ public class MqttModule extends ReactContextBaseJavaModule {
         Log.d(TAG, "───────────────────────────────────────");
 
         final AtomicBoolean callbackFired = new AtomicBoolean(false);
+        // Read once and work from the local: every teardown below then names the client this call was
+        // issued for, rather than whatever happens to be current by the time it runs.
+        final MqttAndroidClient disconnectingClient = client;
 
         try {
-            if (client == null) {
+            if (disconnectingClient == null) {
                 Log.d(TAG, "No active MQTT client to disconnect");
                 safeInvoke(successCallback, callbackFired, "No active connection");
                 return;
             }
 
-            if (client.isConnected()) {
+            if (disconnectingClient.isConnected()) {
                 Log.d(TAG, "Client is connected, disconnecting...");
-                final MqttAndroidClient disconnectingClient = client;
                 disconnectingClient.disconnect(null, new IMqttActionListener() {
                     @Override
                     public void onSuccess(IMqttToken asyncActionToken) {
@@ -1170,13 +1201,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 // A client that is not connected still has to go through disconnect(), because that
                 // is the only call that evicts its handle from the MQTT service.
                 Log.d(TAG, "Client not connected, cleaning up...");
-                cleanupConnection();
+                cleanupConnection(disconnectingClient);
                 safeInvoke(successCallback, callbackFired, "Disconnected successfully");
             }
 
         } catch (Exception e) {
             Log.e(TAG, "Disconnect error", e);
-            cleanupConnection();
+            cleanupConnection(disconnectingClient);
             safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + e.getMessage());
         }
     }

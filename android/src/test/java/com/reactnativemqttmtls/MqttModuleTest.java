@@ -432,13 +432,33 @@ public class MqttModuleTest {
         MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
         setClient(mockClient);
 
-        // invalidate() delegates to onCatalystInstanceDestroy() on React Native 0.69+, and a runtime
-        // that calls both must still tear down exactly once.
+        // Teardown must be idempotent whatever calls it. It has to be: on the 0.71 this module
+        // compiles against, BaseJavaModule.invalidate() still delegates to
+        // onCatalystInstanceDestroy(), so both hooks fire for one module destruction. (On 0.83
+        // invalidate() is empty and only the first fires — the assertion holds either way.)
         mqttModule.invalidate();
         mqttModule.onCatalystInstanceDestroy();
 
         verify(mockClient, times(1)).disconnect(0L);
         verify(mockClient, times(1)).unregisterResources();
+    }
+
+    @Test
+    public void testTeardown_TargetedCleanupLeavesAReplacementClientAlone() throws Exception {
+        MqttAndroidClient failedClient = mock(MqttAndroidClient.class);
+        MqttAndroidClient replacementClient = mock(MqttAndroidClient.class);
+        setClient(replacementClient);
+
+        // What a connect onFailure does: it names the client its own attempt built. Tearing down
+        // "whatever is current" would disconnect the replacement and release its receiver and
+        // binding, which is worse than the field write clientLock was added to prevent.
+        cleanupConnection(failedClient);
+
+        verify(failedClient).disconnect(0L);
+        verify(failedClient).unregisterResources();
+        verifyNoInteractions(replacementClient);
+        assertSame("Replacement client should survive the failed attempt's teardown",
+                   replacementClient, getClient());
     }
 
     /**
@@ -611,6 +631,12 @@ public class MqttModuleTest {
         Method method = MqttModule.class.getDeclaredMethod("cleanupConnection");
         method.setAccessible(true);
         method.invoke(mqttModule);
+    }
+
+    private void cleanupConnection(MqttAndroidClient target) throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("cleanupConnection", MqttAndroidClient.class);
+        method.setAccessible(true);
+        method.invoke(mqttModule, target);
     }
 
     private void releaseClientResources(MqttAndroidClient disconnectedClient) throws Exception {
