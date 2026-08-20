@@ -444,17 +444,20 @@ public class MqttModuleTest {
     }
 
     @Test
-    public void testTeardown_TargetedCleanupLeavesAReplacementClientAlone() throws Exception {
+    public void testTeardown_StaleClientDoesNotIssueDisconnectOnceReplaced() throws Exception {
         MqttAndroidClient failedClient = mock(MqttAndroidClient.class);
         MqttAndroidClient replacementClient = mock(MqttAndroidClient.class);
         setClient(replacementClient);
 
-        // What a connect onFailure does: it names the client its own attempt built. Tearing down
-        // "whatever is current" would disconnect the replacement and release its receiver and
-        // binding, which is worse than the field write clientLock was added to prevent.
+        // What a connect onFailure does: it names the client its own attempt built, which by then may
+        // not be the current one. disconnect() carries nothing but the handle string, and the service
+        // resolves that against whichever MqttConnection is cached under it — the replacement's, since
+        // a reused clientId and broker URL produce the same string. So a stale client must not issue
+        // it. unregisterResources() is per-instance and still has to run, or this attempt leaks its
+        // receiver and its binding.
         cleanupConnection(failedClient);
 
-        verify(failedClient).disconnect(0L);
+        verify(failedClient, never()).disconnect(anyLong());
         verify(failedClient).unregisterResources();
         verifyNoInteractions(replacementClient);
         assertSame("Replacement client should survive the failed attempt's teardown",

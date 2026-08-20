@@ -56,10 +56,13 @@ Requires JDK 17 (the version CI uses). A newer JDK fails the Kotlin plugin with
   containment check that rejects traversal.
 - `MqttBinaryDetectionTest.java` — binary vs text payload classification (UTF-8 validation,
   topic rules).
-- `MqttModuleTest.java` — callback guards (thread-safe single invocation), Base64 handling,
-  `B64:` marker detection.
+- `MqttModuleTest.java` — connection lifecycle: teardown always disconnecting and never closing (the
+  "Client is closed" 32111 reconnect fix), teardown targeting the client it was issued for rather
+  than whichever is current, teardown on module destroy via `invalidate()`, each of `disconnect()`'s
+  paths, and which connect failures mean the cached handle is unusable. Also callback guards
+  (thread-safe single invocation), Base64 handling, and `B64:` marker detection.
 
-91 tests per build variant, run for both `debug` and `release`.
+109 tests per build variant, run for both `debug` and `release`.
 
 **Test reports:** `android/build/reports/tests/testDebugUnitTest/index.html`
 

@@ -287,6 +287,28 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * opens its file persistence in its constructor and closes it again on the next line, taking the
      * lock back only on connect, and MqttDefaultFilePersistence.open() swallows a lock failure
      * anyway, so the next client is never waiting on this one.
+     *
+     * The disconnect is only issued while this client is still the current one, because a client does
+     * not own its handle. MqttAndroidClient.disconnect() passes nothing but its handle string to the
+     * service, which resolves it against whichever MqttConnection is cached under it now — and a
+     * replacement built from the same broker URL and clientId, which is what every reconnect does,
+     * shares that string. Issued from a stale client it would drop the replacement's live session and
+     * remove the entry the replacement still needs, after which every call on it throws
+     * IllegalArgumentException("Invalid ClientHandle"). Skipping it strands nothing: the replacement
+     * owns the handle and evicts it in its own teardown. If the entry it inherits is itself
+     * unusable, that shows up as one CLIENT_CLOSED failure whose onFailure evicts it, rather than as
+     * the permanent wedge this method exists to prevent. unregisterResources() acts on this instance
+     * alone, so it always runs.
+     *
+     * Holding clientLock across the disconnect, rather than only across the read, means no client can
+     * be installed between the two. That is safe because nothing in the call blocks or re-enters this
+     * module: MqttService.callbackToActivity() publishes its status with Context.sendBroadcast(), so
+     * MqttAndroidClient's receiver runs later on the main-thread looper instead of inline;
+     * MqttConnection.disconnect() never waits on the token and clears its message store on
+     * Dispatchers.IO; and ClientComms.disconnect() hands the wire disconnect to a background
+     * DisconnectBG. The lock's only other critical sections are one field write each. That reasoning
+     * is pinned to the paho.mqtt.android 3.6.4 and mqttv3 1.2.5 in build.gradle — a bump wants it
+     * rechecked.
      */
     private void cleanupConnection(MqttAndroidClient staleClient) {
         Log.d(TAG, "Cleaning up MQTT connection state...");
@@ -296,13 +318,21 @@ public class MqttModule extends ReactContextBaseJavaModule {
             return;
         }
 
-        try {
-            Log.d(TAG, "  - Disconnecting client (evicts its handle from the MQTT service)...");
-            staleClient.disconnect(TEARDOWN_QUIESCE_TIMEOUT_MS);
-        } catch (Exception e) {
-            // Thrown when the client never finished binding to the service, or when its handle is
-            // already gone. Either way there is no handle left to strand.
-            Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
+        synchronized (clientLock) {
+            if (client == staleClient) {
+                try {
+                    Log.d(TAG, "  - Disconnecting client (evicts its handle from the MQTT service)...");
+                    staleClient.disconnect(TEARDOWN_QUIESCE_TIMEOUT_MS);
+                } catch (Exception e) {
+                    // Thrown when the client never finished binding to the service, or when its
+                    // handle is already gone. Either way there is no handle left to strand.
+                    Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
+                }
+            } else {
+                // A newer client holds this handle. Disconnecting would evict its entry and drop its
+                // session; it tears the handle down itself when its own teardown runs.
+                Log.d(TAG, "  - Skipping disconnect: a replacement client now owns this handle");
+            }
         }
 
         releaseClientResources(staleClient);

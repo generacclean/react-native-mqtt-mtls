@@ -54,12 +54,22 @@ All notable changes to this project will be documented in this file.
     connect to overwrite.
   - A callback arriving after a new connection has replaced the client no longer tears down that
     replacement. Every teardown outside `invalidate()` now names the client it was issued for rather
-    than reading whichever is current: `cleanupConnection(MqttAndroidClient)` disconnects the client
-    it is given, and `releaseClientResources()` only forgets the field if that client is still the one
-    in it. Reading the field twice — once to check, once to tear down — was the whole problem, since a
-    `connect()` on the bridge thread can install a new client between the two reads. The remaining
-    compare-and-clear holds the same lock as the install in `connect()`, so nothing can be installed
-    between its two halves either; `volatile` alone would have given visibility without atomicity.
+    than reading whichever is current, because reading the field twice — once to check, once to tear
+    down — was the whole problem: a `connect()` on the bridge thread can install a new client between
+    the two reads. `releaseClientResources()` releases the receiver and binding of the client it is
+    given and only forgets the field if that client is still the one in it.
+  - `cleanupConnection(MqttAndroidClient)` issues its disconnect only while the client it was given is
+    still the current one, since a client does not own its handle.
+    `MqttAndroidClient.disconnect()` passes nothing but its handle string to the service, which
+    resolves it against whichever `MqttConnection` is cached under it now — and a replacement built
+    from the same broker URL and `clientId` shares that string. Issued from a stale client it would
+    drop the replacement's live session and remove the entry the replacement still needs, after which
+    every call on it throws `IllegalArgumentException("Invalid ClientHandle")`. Skipping it strands
+    nothing, because the replacement owns the handle and evicts it in its own teardown. The check
+    holds the same lock as the install in `connect()`, and holds it across the disconnect, so no
+    client can be installed between the two; `volatile` alone would have given visibility without
+    atomicity. That is safe because nothing in the call blocks or re-enters the module — Paho
+    publishes its status with `Context.sendBroadcast()`, delivered later on the main-thread looper.
   - iOS is unaffected: CocoaMQTT holds its client directly, with no service-owned cache.
 
 ## [1.4.0] - 2026-08-12
