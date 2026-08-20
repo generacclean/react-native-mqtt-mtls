@@ -11,6 +11,11 @@ import org.mockito.MockitoAnnotations;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 
+import info.mqtt.android.service.MqttAndroidClient;
+import org.eclipse.paho.client.mqttv3.MqttException;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -343,6 +348,139 @@ public class MqttModuleTest {
         byte[] decoded = android.util.Base64.decode(base64, android.util.Base64.NO_WRAP);
 
         assertArrayEquals("Binary data should survive Base64 round-trip", binaryData, decoded);
+    }
+
+    /**
+     * Teardown Tests
+     *
+     * MqttService caches one MqttConnection per "serverURI:clientId:packageName" handle and only
+     * drops it on disconnect(). close() leaves the entry behind pointing at a closed client, so with
+     * a reused clientId every later connect fails instantly with "Client is closed" (32111) for the
+     * life of the process. Teardown must therefore always disconnect and never close.
+     */
+
+    @Test
+    public void testTeardown_DisconnectsClientThatIsNotConnected() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(false);
+        setClient(mockClient);
+
+        cleanupConnection();
+
+        verify(mockClient).disconnect(0L);
+        verify(mockClient, never()).close();
+        verify(mockClient).unregisterResources();
+        assertNull("Client reference should be cleared", getClient());
+    }
+
+    @Test
+    public void testTeardown_DisconnectsConnectedClient() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(true);
+        setClient(mockClient);
+
+        cleanupConnection();
+
+        verify(mockClient).disconnect(0L);
+        verify(mockClient, never()).close();
+        assertNull("Client reference should be cleared", getClient());
+    }
+
+    @Test
+    public void testTeardown_ReleasesResourcesWhenDisconnectThrows() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.disconnect(anyLong())).thenThrow(new IllegalStateException("service not bound"));
+        setClient(mockClient);
+
+        cleanupConnection();
+
+        verify(mockClient).unregisterResources();
+        assertNull("Client reference should be cleared even when disconnect fails", getClient());
+    }
+
+    @Test
+    public void testTeardown_NoClientIsNotAnError() throws Exception {
+        setClient(null);
+
+        cleanupConnection();
+
+        assertNull(getClient());
+    }
+
+    @Test
+    public void testTeardown_KeepsCurrentClientWhenALaterOneReplacedIt() throws Exception {
+        MqttAndroidClient oldClient = mock(MqttAndroidClient.class);
+        MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
+        setClient(currentClient);
+
+        // A late disconnect callback from the previous client must not tear down its replacement
+        releaseClientResources(oldClient);
+
+        verify(oldClient).unregisterResources();
+        assertSame("Current client should survive the old client's callback",
+                   currentClient, getClient());
+    }
+
+    /**
+     * Unusable Client Detection Tests
+     */
+
+    @Test
+    public void testUnusableClientFailure_ClosedClient() throws Exception {
+        assertTrue("A closed client can never be reconnected",
+                   isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_CLIENT_CLOSED)));
+    }
+
+    @Test
+    public void testUnusableClientFailure_AlreadyConnectedClient() throws Exception {
+        assertTrue("An already-connected cached client cannot be reconnected",
+                   isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_CLIENT_CONNECTED)));
+    }
+
+    @Test
+    public void testUnusableClientFailure_UnreachableBroker() throws Exception {
+        assertFalse("An unreachable broker is worth retrying against the same client",
+                    isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_SERVER_CONNECT_ERROR)));
+    }
+
+    @Test
+    public void testUnusableClientFailure_NonMqttException() throws Exception {
+        assertFalse(isUnusableClientFailure(new RuntimeException("boom")));
+        assertFalse(isUnusableClientFailure(null));
+    }
+
+    /**
+     * Reflection helpers — the teardown logic under test is private module state
+     */
+
+    private void setClient(MqttAndroidClient value) throws Exception {
+        Field field = MqttModule.class.getDeclaredField("client");
+        field.setAccessible(true);
+        field.set(mqttModule, value);
+    }
+
+    private Object getClient() throws Exception {
+        Field field = MqttModule.class.getDeclaredField("client");
+        field.setAccessible(true);
+        return field.get(mqttModule);
+    }
+
+    private void cleanupConnection() throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("cleanupConnection");
+        method.setAccessible(true);
+        method.invoke(mqttModule);
+    }
+
+    private void releaseClientResources(MqttAndroidClient disconnectedClient) throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("releaseClientResources", MqttAndroidClient.class);
+        method.setAccessible(true);
+        method.invoke(mqttModule, disconnectedClient);
+    }
+
+    private boolean isUnusableClientFailure(Throwable exception) throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("isUnusableClientFailure", Throwable.class);
+        method.setAccessible(true);
+        return (boolean) method.invoke(null, exception);
     }
 
     /**

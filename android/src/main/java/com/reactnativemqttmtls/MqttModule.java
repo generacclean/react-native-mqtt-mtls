@@ -39,6 +39,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
      */
     private static final String BINARY_MARKER = "B64:";
 
+    /**
+     * Quiesce timeout for a teardown disconnect. Zero because teardown must not wait on in-flight
+     * messages: either a new connection is about to be established, or the transport is already
+     * gone and waiting would only delay the failure.
+     */
+    private static final long TEARDOWN_QUIESCE_TIMEOUT_MS = 0;
+
     // Keep a direct reference to our full BouncyCastle provider instance
     // to avoid getting the system's stripped-down BC provider
     private static final Provider FULL_BC_PROVIDER = new BouncyCastleProvider();
@@ -48,7 +55,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private static final Object providerLock = new Object();
 
     private final ReactApplicationContext reactContext;
-    private MqttAndroidClient client;
+    // Written on the bridge thread by connect(), read and cleared from Paho's callbacks on the main
+    // thread, so both sides must see the same instance to avoid tearing down the wrong client.
+    private volatile MqttAndroidClient client;
     private volatile boolean isAutoReconnectEnabled = false;
 
     /**
@@ -196,33 +205,88 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Centralized cleanup method to properly close and null out the MQTT client
+     * Tears down the current client and evicts its handle from the Paho Android service.
+     *
+     * The service keeps a map of MqttConnection instances keyed by
+     * "serverURI:clientId:packageName", and hands the cached instance to every MqttAndroidClient
+     * built from those same three values. Only MqttService.disconnect() removes an entry from that
+     * map; MqttService.close() closes the underlying MqttAsyncClient and leaves the entry in place.
+     * Because callers reuse a persisted clientId against a fixed broker URL, closing without
+     * disconnecting strands a permanently closed client under the handle the next connect resolves
+     * to, and from then on every connect fails immediately with "Client is closed (32111)" for the
+     * remaining life of the process.
+     *
+     * So disconnect() is the only teardown issued here, and it is issued even when isConnected() is
+     * false. MqttConnection.disconnect() tolerates a client that is not connected — it reports an
+     * error status instead of throwing — and the handle is evicted either way. That not-connected
+     * path is what an ungraceful drop looks like (airplane mode, or the device leaving range of the
+     * gateway's access point), and it is the case that used to strand the handle.
+     *
+     * close() is deliberately not called: after disconnect() the handle is gone, so close() could
+     * only log an invalid-handle error. Paho closes its persistence and stops its comms and ping
+     * threads while disconnecting, so the file lock the next client needs is released without it.
      */
     private void cleanupConnection() {
         Log.d(TAG, "Cleaning up MQTT connection state...");
 
-        if (client != null) {
-            try {
-                if (client.isConnected()) {
-                    Log.d(TAG, "  - Client is connected, disconnecting...");
-                    try {
-                        client.disconnect(0);
-                    } catch (Exception e) {
-                        Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
-                    }
-                }
+        final MqttAndroidClient staleClient = client;
 
-                Log.d(TAG, "  - Closing client...");
-                client.close();
-            } catch (Exception e) {
-                Log.w(TAG, "  - Error during cleanup (non-critical): " + e.getMessage());
-            } finally {
-                client = null;
-                Log.d(TAG, "✓ Cleanup complete");
-            }
-        } else {
+        if (staleClient == null) {
             Log.d(TAG, "  - No active client to clean up");
+            return;
         }
+
+        try {
+            Log.d(TAG, "  - Disconnecting client (evicts its handle from the MQTT service)...");
+            staleClient.disconnect(TEARDOWN_QUIESCE_TIMEOUT_MS);
+        } catch (Exception e) {
+            // Thrown when the client never finished binding to the service, or when its handle is
+            // already gone. Either way there is no handle left to strand.
+            Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
+        }
+
+        releaseClientResources(staleClient);
+        Log.d(TAG, "✓ Cleanup complete");
+    }
+
+    /**
+     * Releases the receiver registration and service binding of a client that has already been
+     * disconnected, and forgets it.
+     *
+     * Neither is released by close(), so every teardown that went through close() leaked a
+     * registered BroadcastReceiver and a bound service. The client is only forgotten if it is still
+     * the current one: a disconnect callback can arrive after a new connection has replaced it, and
+     * that new client must not be torn down by the old client's callback.
+     */
+    private void releaseClientResources(MqttAndroidClient disconnectedClient) {
+        if (disconnectedClient == null) {
+            return;
+        }
+
+        try {
+            disconnectedClient.unregisterResources();
+        } catch (Exception e) {
+            Log.w(TAG, "Resource release error (non-critical): " + e.getMessage());
+        }
+
+        if (client == disconnectedClient) {
+            client = null;
+        }
+    }
+
+    /**
+     * Whether a connect failure means the cached MqttConnection behind our handle is unusable,
+     * rather than the broker being unreachable. Retrying against the same handle can never succeed,
+     * so the handle has to be evicted first. See {@link #cleanupConnection()}.
+     */
+    private static boolean isUnusableClientFailure(Throwable exception) {
+        if (!(exception instanceof MqttException)) {
+            return false;
+        }
+
+        int reasonCode = ((MqttException) exception).getReasonCode();
+        return reasonCode == MqttException.REASON_CODE_CLIENT_CLOSED
+                || reasonCode == MqttException.REASON_CODE_CLIENT_CONNECTED;
     }
 
     @NonNull
@@ -681,10 +745,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.i(TAG, "Expected broker CN: " + (effectiveBrokerCN != null ? effectiveBrokerCN : "N/A (admin)"));
             Log.i(TAG, "Key: " + privateKeyAlias + " (software)");
 
-            client = new MqttAndroidClient(
+            final MqttAndroidClient attemptClient = new MqttAndroidClient(
                     getReactApplicationContext(),
                     brokerUrl,
                     clientId);
+            client = attemptClient;
 
             MqttConnectOptions options = new MqttConnectOptions();
             options.setCleanSession(true);
@@ -704,7 +769,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
-            client.setCallback(new MqttCallbackExtended() {
+            attemptClient.setCallback(new MqttCallbackExtended() {
                 @Override
                 public void connectComplete(boolean reconnect, String serverURI) {
                     Log.i(TAG, "MQTT connected to " + serverURI + (reconnect ? " (reconnected)" : ""));
@@ -757,7 +822,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 }
             });
 
-            client.connect(options, null, new IMqttActionListener() {
+            attemptClient.connect(options, null, new IMqttActionListener() {
                 @Override
                 public void onSuccess(IMqttToken asyncActionToken) {
                     Log.i(TAG, "MQTT CONNECTION SUCCESSFUL");
@@ -776,6 +841,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
                         Log.e(TAG, "MQTT CONNECTION FAILED", exception);
                     } else {
                         Log.e(TAG, "MQTT CONNECTION FAILED: Unknown error");
+                    }
+
+                    // Nothing this client does can recover an unusable cached connection, so evict
+                    // its handle now and let the next attempt build a fresh one.
+                    if (isUnusableClientFailure(exception) && client == attemptClient) {
+                        Log.w(TAG, "Client handle is unusable, evicting it so the next attempt starts clean");
+                        cleanupConnection();
                     }
 
                     safeInvoke(error, callbackFired, errorMessage);
@@ -1015,18 +1087,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             if (client.isConnected()) {
                 Log.d(TAG, "Client is connected, disconnecting...");
-                client.disconnect(null, new IMqttActionListener() {
+                final MqttAndroidClient disconnectingClient = client;
+                disconnectingClient.disconnect(null, new IMqttActionListener() {
                     @Override
                     public void onSuccess(IMqttToken asyncActionToken) {
-                        try {
-                            client.close();
-                            client = null;
-                            Log.i(TAG, "✓ MQTT disconnected and cleaned up");
-                            safeInvoke(successCallback, callbackFired, "Disconnected successfully");
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error closing client", e);
-                            safeInvoke(errorCallback, callbackFired, "Disconnect error: " + e.getMessage());
-                        }
+                        releaseClientResources(disconnectingClient);
+                        Log.i(TAG, "✓ MQTT disconnected and cleaned up");
+                        safeInvoke(successCallback, callbackFired, "Disconnected successfully");
                     }
 
                     @Override
@@ -1034,41 +1101,24 @@ public class MqttModule extends ReactContextBaseJavaModule {
                         String errorMsg = exception != null ? exception.getMessage() : "Disconnect failed";
                         Log.e(TAG, "Disconnect failed: " + errorMsg);
 
-                        try {
-                            if (client != null) {
-                                client.close();
-                                client = null;
-                            }
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error force-closing client", e);
-                        }
+                        // The handle is evicted whether or not the broker acknowledged, so the
+                        // client is finished with either way.
+                        releaseClientResources(disconnectingClient);
 
                         safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + errorMsg);
                     }
                 });
             } else {
+                // A client that is not connected still has to go through disconnect(), because that
+                // is the only call that evicts its handle from the MQTT service.
                 Log.d(TAG, "Client not connected, cleaning up...");
-                try {
-                    client.close();
-                } catch (Exception e) {
-                    Log.e(TAG, "Error closing disconnected client", e);
-                }
-                client = null;
+                cleanupConnection();
                 safeInvoke(successCallback, callbackFired, "Disconnected successfully");
             }
 
         } catch (Exception e) {
             Log.e(TAG, "Disconnect error", e);
-
-            try {
-                if (client != null) {
-                    client.close();
-                    client = null;
-                }
-            } catch (Exception cleanupException) {
-                Log.e(TAG, "Cleanup error", cleanupException);
-            }
-
+            cleanupConnection();
             safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + e.getMessage());
         }
     }
