@@ -5,6 +5,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -12,6 +13,7 @@ import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 
 import info.mqtt.android.service.MqttAndroidClient;
+import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.MqttException;
 
 import java.lang.reflect.Field;
@@ -360,9 +362,10 @@ public class MqttModuleTest {
      */
 
     @Test
-    public void testTeardown_DisconnectsClientThatIsNotConnected() throws Exception {
+    public void testTeardown_AlwaysDisconnectsAndNeverCloses() throws Exception {
+        // Deliberately no isConnected() stub: teardown must not consult it. A not-connected client
+        // is exactly the ungraceful-drop case that used to take the close-only path.
         MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
-        when(mockClient.isConnected()).thenReturn(false);
         setClient(mockClient);
 
         cleanupConnection();
@@ -370,19 +373,7 @@ public class MqttModuleTest {
         verify(mockClient).disconnect(0L);
         verify(mockClient, never()).close();
         verify(mockClient).unregisterResources();
-        assertNull("Client reference should be cleared", getClient());
-    }
-
-    @Test
-    public void testTeardown_DisconnectsConnectedClient() throws Exception {
-        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
-        when(mockClient.isConnected()).thenReturn(true);
-        setClient(mockClient);
-
-        cleanupConnection();
-
-        verify(mockClient).disconnect(0L);
-        verify(mockClient, never()).close();
+        verify(mockClient, never()).isConnected();
         assertNull("Client reference should be cleared", getClient());
     }
 
@@ -421,6 +412,143 @@ public class MqttModuleTest {
                    currentClient, getClient());
     }
 
+    @Test
+    public void testInvalidate_TearsDownClient() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        setClient(mockClient);
+
+        // React Native destroying the module (a JS reload, for instance) is the one teardown the app
+        // cannot request itself, and skipping it leaks the receiver, the binding and the handle.
+        mqttModule.invalidate();
+
+        verify(mockClient).disconnect(0L);
+        verify(mockClient).unregisterResources();
+        verify(mockClient, never()).close();
+        assertNull("Client reference should be cleared", getClient());
+    }
+
+    @Test
+    public void testInvalidate_IsIdempotent() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        setClient(mockClient);
+
+        // invalidate() delegates to onCatalystInstanceDestroy() on React Native 0.69+, and a runtime
+        // that calls both must still tear down exactly once.
+        mqttModule.invalidate();
+        mqttModule.onCatalystInstanceDestroy();
+
+        verify(mockClient, times(1)).disconnect(0L);
+        verify(mockClient, times(1)).unregisterResources();
+    }
+
+    /**
+     * disconnect() Tests
+     *
+     * This is the entry point the app actually calls — MQTTManagerMtls disconnects before every
+     * connect — so an ungraceful drop reaches the fix through the not-connected branch here rather
+     * than through the connect onFailure eviction.
+     */
+
+    @Test
+    public void testDisconnect_NotConnectedClientIsStillDisconnected() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(false);
+        setClient(mockClient);
+
+        Callback success = mock(Callback.class);
+        Callback error = mock(Callback.class);
+
+        mqttModule.disconnect(success, error);
+
+        verify(mockClient).disconnect(0L);
+        verify(mockClient, never()).close();
+        verify(mockClient).unregisterResources();
+        assertNull("Client reference should be cleared", getClient());
+        verify(success).invoke("Disconnected successfully");
+        verify(error, never()).invoke(any());
+    }
+
+    @Test
+    public void testDisconnect_ConnectedClientReleasesResourcesOnSuccess() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(true);
+        setClient(mockClient);
+
+        Callback success = mock(Callback.class);
+        Callback error = mock(Callback.class);
+
+        mqttModule.disconnect(success, error);
+
+        ArgumentCaptor<IMqttActionListener> listener = ArgumentCaptor.forClass(IMqttActionListener.class);
+        verify(mockClient).disconnect(any(), listener.capture());
+        verify(mockClient, never()).close();
+        verifyNoInteractions(success, error);
+
+        listener.getValue().onSuccess(null);
+
+        verify(mockClient).unregisterResources();
+        assertNull("Client reference should be cleared", getClient());
+        verify(success).invoke("Disconnected successfully");
+        verify(error, never()).invoke(any());
+    }
+
+    @Test
+    public void testDisconnect_ReleasesResourcesWhenBrokerDisconnectFails() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(true);
+        setClient(mockClient);
+
+        Callback success = mock(Callback.class);
+        Callback error = mock(Callback.class);
+
+        mqttModule.disconnect(success, error);
+
+        ArgumentCaptor<IMqttActionListener> listener = ArgumentCaptor.forClass(IMqttActionListener.class);
+        verify(mockClient).disconnect(any(), listener.capture());
+
+        // The handle is evicted whether or not the broker acknowledged, so the client is finished
+        // with either way and its receiver and binding have to be released.
+        listener.getValue().onFailure(null, new MqttException(MqttException.REASON_CODE_CLIENT_TIMEOUT));
+
+        verify(mockClient).unregisterResources();
+        assertNull("Client reference should be cleared", getClient());
+        verify(error).invoke(contains("Disconnect failed"));
+        verify(success, never()).invoke(any());
+    }
+
+    @Test
+    public void testDisconnect_ReleasesResourcesWhenDisconnectThrows() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        when(mockClient.isConnected()).thenReturn(true);
+        when(mockClient.disconnect(any(), any(IMqttActionListener.class)))
+                .thenThrow(new IllegalStateException("service not bound"));
+        setClient(mockClient);
+
+        Callback success = mock(Callback.class);
+        Callback error = mock(Callback.class);
+
+        mqttModule.disconnect(success, error);
+
+        verify(mockClient).unregisterResources();
+        verify(mockClient, never()).close();
+        assertNull("Client reference should be cleared", getClient());
+        verify(error).invoke(contains("Disconnect failed"));
+        verify(success, never()).invoke(any());
+    }
+
+    @Test
+    public void testDisconnect_NoClientIsNotAnError() throws Exception {
+        setClient(null);
+
+        Callback success = mock(Callback.class);
+        Callback error = mock(Callback.class);
+
+        mqttModule.disconnect(success, error);
+
+        verify(success).invoke("No active connection");
+        verify(error, never()).invoke(any());
+    }
+
     /**
      * Unusable Client Detection Tests
      */
@@ -435,6 +563,20 @@ public class MqttModuleTest {
     public void testUnusableClientFailure_AlreadyConnectedClient() throws Exception {
         assertTrue("An already-connected cached client cannot be reconnected",
                    isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_CLIENT_CONNECTED)));
+    }
+
+    @Test
+    public void testUnusableClientFailure_DisconnectingClient() throws Exception {
+        // Transient in plain Paho, permanent here: MqttService.disconnect() drops the map entry as
+        // soon as it is called, so a handle reporting DISCONNECTING is already orphaned.
+        assertTrue("A disconnecting client's handle is already orphaned",
+                   isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_CLIENT_DISCONNECTING)));
+    }
+
+    @Test
+    public void testUnusableClientFailure_ConnectInProgress() throws Exception {
+        assertFalse("A connect already in progress resolves on its own and must not be evicted",
+                    isUnusableClientFailure(new MqttException(MqttException.REASON_CODE_CONNECT_IN_PROGRESS)));
     }
 
     @Test

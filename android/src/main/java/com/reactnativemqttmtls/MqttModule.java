@@ -55,6 +55,15 @@ public class MqttModule extends ReactContextBaseJavaModule {
     private static final Object providerLock = new Object();
 
     private final ReactApplicationContext reactContext;
+    /**
+     * Guards every mutation of {@link #client}. The field is volatile so the plain null and
+     * isConnected() reads scattered through the module see the current instance, but visibility
+     * alone is not enough for the compare-and-clear in {@link #releaseClientResources}: without a
+     * lock, a connect() on the bridge thread could install a new client between that compare and
+     * its clear, and a stale callback would then null out a live client. Both the install in
+     * connect() and the compare-and-clear hold this lock, so they cannot interleave.
+     */
+    private final Object clientLock = new Object();
     // Written on the bridge thread by connect(), read and cleared from Paho's callbacks on the main
     // thread, so both sides must see the same instance to avoid tearing down the wrong client.
     private volatile MqttAndroidClient client;
@@ -140,9 +149,36 @@ public class MqttModule extends ReactContextBaseJavaModule {
         super(reactContext);
         this.reactContext = reactContext;
         setupBouncyCastle();
+        // No teardown here: `client` is an instance field, so it is always null in a fresh module
+        // and cleanupConnection() could only return at its first check. State that outlives a module
+        // is torn down by invalidate() on the way out, not by the next module on the way in.
+    }
 
-        // Clean up any stale connections from previous app instances
-        Log.d(TAG, "MqttModule initialized - performing initial cleanup");
+    /**
+     * Tears down the connection when React Native destroys the module.
+     *
+     * This is the one moment the app cannot ask for cleanup itself, and the moment that needs it
+     * most: a JS reload drops the module while MqttService keeps running, so without this the
+     * receiver stays registered, the service stays bound, and the handle stays cached — the three
+     * leaks this teardown exists to prevent.
+     */
+    @Override
+    public void invalidate() {
+        Log.d(TAG, "React context invalidated - tearing down MQTT connection");
+        cleanupConnection();
+        super.invalidate();
+    }
+
+    /**
+     * Pre-0.69 equivalent of {@link #invalidate()}. React Native 0.69+ calls invalidate(), whose
+     * default implementation delegates here; older versions call this directly. cleanupConnection()
+     * is idempotent — it returns at its first check once the client is forgotten — so a runtime that
+     * calls both tears down once.
+     */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onCatalystInstanceDestroy() {
+        Log.d(TAG, "Catalyst instance destroyed - tearing down MQTT connection");
         cleanupConnection();
     }
 
@@ -223,8 +259,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * gateway's access point), and it is the case that used to strand the handle.
      *
      * close() is deliberately not called: after disconnect() the handle is gone, so close() could
-     * only log an invalid-handle error. Paho closes its persistence and stops its comms and ping
-     * threads while disconnecting, so the file lock the next client needs is released without it.
+     * only log an invalid-handle error. Nothing is left for it to release either — MqttAsyncClient
+     * opens its file persistence in its constructor and closes it again on the next line, taking the
+     * lock back only on connect, and MqttDefaultFilePersistence.open() swallows a lock failure
+     * anyway, so the next client is never waiting on this one.
      */
     private void cleanupConnection() {
         Log.d(TAG, "Cleaning up MQTT connection state...");
@@ -269,8 +307,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.w(TAG, "Resource release error (non-critical): " + e.getMessage());
         }
 
-        if (client == disconnectedClient) {
-            client = null;
+        synchronized (clientLock) {
+            if (client == disconnectedClient) {
+                client = null;
+            }
         }
     }
 
@@ -278,6 +318,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * Whether a connect failure means the cached MqttConnection behind our handle is unusable,
      * rather than the broker being unreachable. Retrying against the same handle can never succeed,
      * so the handle has to be evicted first. See {@link #cleanupConnection()}.
+     *
+     * ClientComms.connect() throws all three of these codes from the same block, when the client is
+     * in a state it cannot connect from. CLIENT_DISCONNECTING is transient in plain Paho, because
+     * shutdownConnection() moves the state on to DISCONNECTED; it is not transient here, because
+     * MqttService.disconnect() drops the map entry the moment it is called while the underlying
+     * disconnect is still running, so a handle that reports DISCONNECTING is already orphaned.
+     * Evicting it is safe either way: the next attempt builds a fresh MqttConnection instead of
+     * waiting on state it cannot observe.
+     *
+     * CONNECT_IN_PROGRESS (32110) is deliberately excluded — it resolves on its own, and evicting
+     * there would tear down a healthy attempt.
      */
     private static boolean isUnusableClientFailure(Throwable exception) {
         if (!(exception instanceof MqttException)) {
@@ -286,7 +337,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         int reasonCode = ((MqttException) exception).getReasonCode();
         return reasonCode == MqttException.REASON_CODE_CLIENT_CLOSED
-                || reasonCode == MqttException.REASON_CODE_CLIENT_CONNECTED;
+                || reasonCode == MqttException.REASON_CODE_CLIENT_CONNECTED
+                || reasonCode == MqttException.REASON_CODE_CLIENT_DISCONNECTING;
     }
 
     @NonNull
@@ -749,7 +801,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     getReactApplicationContext(),
                     brokerUrl,
                     clientId);
-            client = attemptClient;
+            synchronized (clientLock) {
+                client = attemptClient;
+            }
 
             MqttConnectOptions options = new MqttConnectOptions();
             options.setCleanSession(true);
@@ -856,6 +910,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             Log.e(TAG, "MQTT setup error", e);
             e.printStackTrace();
+            // Anything thrown after the client was installed leaves a client that has already
+            // registered its receiver and bound the service, and whose handle is cached. The next
+            // connect() would clear the field without releasing any of that, so release it here.
+            cleanupConnection();
             safeInvoke(error, callbackFired, e.getMessage() != null ? e.getMessage() : "Setup failed");
         }
     }

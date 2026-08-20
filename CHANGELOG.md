@@ -25,16 +25,34 @@ All notable changes to this project will be documented in this file.
   - Teardown now always disconnects, whatever `isConnected()` reports, and never closes.
     `MqttConnection.disconnect()` tolerates a client that was never connected (it reports an error
     status rather than throwing) and the handle is evicted either way. `close()` is not called at
-    all: after the disconnect the handle is gone, so it could only log an invalid-handle error, and
-    Paho closes its persistence and stops its comms and ping threads while disconnecting, so the
-    file lock the next client needs is released without it.
+    all: after the disconnect the handle is gone, so it could only log an invalid-handle error.
+    Nothing is left for it to release either — `MqttAsyncClient` opens its file persistence in its
+    constructor and closes it again on the next line, taking the lock back only on connect, and
+    `MqttDefaultFilePersistence.open()` swallows a lock failure anyway.
   - Teardown now also calls `unregisterResources()`, which releases the `BroadcastReceiver`
     registration and the bound service. `close()` released neither, so every teardown leaked both.
-  - A connect that still fails with `REASON_CODE_CLIENT_CLOSED` or `REASON_CODE_CLIENT_CONNECTED`
-    now evicts its handle instead of leaving it for the next attempt to trip over. Neither can be
-    recovered by retrying against the same cached connection, so the next attempt starts clean.
+  - Teardown now runs when React Native destroys the module (`invalidate()`, or
+    `onCatalystInstanceDestroy()` on React Native below 0.69). A JS reload drops the module while
+    `MqttService` keeps running, and it is the one teardown the app cannot request for itself, so
+    without it a reload left the receiver registered, the service bound and the handle cached. The
+    constructor no longer attempts a teardown: `client` is an instance field, always null in a fresh
+    module, so that call could only return at its first check.
+  - A connect that still fails with `REASON_CODE_CLIENT_CLOSED`, `REASON_CODE_CLIENT_CONNECTED` or
+    `REASON_CODE_CLIENT_DISCONNECTING` now evicts its handle instead of leaving it for the next
+    attempt to trip over. `ClientComms.connect()` throws all three from the same block, and none can
+    be recovered by retrying against the same cached connection — `CLIENT_DISCONNECTING` is
+    transient in plain Paho, where `shutdownConnection()` moves the state on to `DISCONNECTED`, but
+    not here, because `MqttService.disconnect()` drops the map entry the moment it is called while
+    the underlying disconnect is still running. `REASON_CODE_CONNECT_IN_PROGRESS` is deliberately
+    excluded: it resolves on its own, and evicting there would tear down a healthy attempt.
+  - A connect that throws after its client was installed now tears that client down instead of
+    leaving a client that has already registered its receiver and bound the service for the next
+    connect to overwrite.
   - A disconnect callback arriving after a new connection has replaced the client no longer tears
-    down that replacement — the callback releases the instance it was issued for.
+    down that replacement — the callback releases the instance it was issued for. That
+    compare-and-clear holds the same lock as the install in `connect()`, so a new client cannot be
+    installed between the two halves of it; `volatile` alone would have given visibility without
+    atomicity.
   - iOS is unaffected: CocoaMQTT holds its client directly, with no service-owned cache.
 
 ## [1.4.0] - 2026-08-12
