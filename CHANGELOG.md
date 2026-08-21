@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-08-26
+
+### Fixed
+
+- **`cleanup` was missing from the JS module on iOS**
+  - Every app start logged `The Objective-C cleanup:(RCTResponseSenderBlock)successCallback
+errorCallback:(RCTResponseSenderBlock)errorCallback method signature for the JS method cleanup
+can not be found in the Objective-C definition of the MqttModule module.` React Native then
+    dropped the method, so `MqttModule.cleanup` was `undefined` on iOS.
+  - Root cause: `RCT_EXTERN_MODULE` splits the module in two. `MqttModule.m` declared the selector
+    `cleanup:errorCallback:`, while `MqttModule.swift` implemented `func cleanup(_ callback:)`,
+    which exports `cleanup:`. React Native reads the declaration, asks the class for that selector,
+    finds nothing, and skips the method. The mismatch is invisible at compile time because the two
+    halves never reference each other.
+  - The Swift signature now takes both callbacks, matching the declaration, the Android module, and
+    the `MqttModuleType` interface. `errorCallback` stays unused because nothing in the cleanup path
+    can fail, the same as `disconnect`.
+  - Effect on callers: `MqttManager` and `MqttProvider` both guard with
+    `typeof MqttModule.cleanup === "function"` and fall back to `disconnect`, which runs the same
+    teardown, so iOS behaviour does not change. iOS now runs the intended path and stops warning.
+
+### Added
+
+- `__tests__/native-bridge-parity.test.ts` reads `MqttModule.m`, `MqttModule.swift` and the Android
+  module as text and compares the exported selectors and argument counts. It fails on the bug above.
+- A `Jest` workflow, so the JavaScript suite runs on every pull request. Android and iOS trust
+  validation already had one; JavaScript did not, so the parity test above would never have run.
+
 ## [1.5.0] - 2026-08-24
 
 ### Added
