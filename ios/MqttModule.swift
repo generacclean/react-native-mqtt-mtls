@@ -163,17 +163,22 @@ class MqttModule: RCTEventEmitter {
         os_log("✓ Cleanup complete", log: logger, type: .info)
     }
     
+    // `errorCallback` is part of the bridge contract declared in MqttModule.m and implemented on
+    // Android, so it stays in the signature even though nothing here can fail. Dropping it changes
+    // the exported selector to `cleanup:`, which no longer matches the declaration, and React Native
+    // then drops the whole method from the JS module.
     @objc
-    func cleanup(_ callback: @escaping RCTResponseSenderBlock) {
+    func cleanup(_ successCallback: @escaping RCTResponseSenderBlock,
+                 errorCallback: @escaping RCTResponseSenderBlock) {
         os_log("", log: logger, type: .info)
         os_log("───────────────────────────────────────────────────────", log: logger, type: .info)
         os_log("EXPLICIT CLEANUP REQUESTED", log: logger, type: .info)
         os_log("───────────────────────────────────────────────────────", log: logger, type: .info)
-        
+
         cleanupConnection()
-        
+
         os_log("", log: logger, type: .info)
-        callback(["Cleanup successful"])
+        successCallback(["Cleanup successful"])
     }
     
     @objc
