@@ -897,6 +897,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                         WritableMap eventData = Arguments.createMap();
                         eventData.putString("topic", topic);
+                        // A retained message is a replay from the broker's store on subscribe, not
+                        // an answer to a request the app just sent. Consumers need to tell them apart.
+                        eventData.putBoolean("isRetained", message.isRetained());
 
                         if (isBinary) {
                             // Binary data: Base64 encode for transport over bridge

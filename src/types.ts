@@ -3,6 +3,11 @@ export interface MqttMessage {
   message: string | Uint8Array;
   qos: number;
   isBinary?: boolean;
+  /**
+   * True when the broker replayed this from its retained store on subscribe rather than delivering
+   * it live, so it may predate the current session. Undefined on library versions that predate it.
+   */
+  isRetained?: boolean;
 }
 
 export interface MqttCertificates {
