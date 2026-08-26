@@ -167,6 +167,95 @@ describe('MqttManager', () => {
     });
   });
 
+  describe('Retained Flag Propagation', () => {
+    it('should forward isRetained to the consumer so a replay can be told from a live delivery', () => {
+      const mockCallback = jest.fn();
+      const config: MqttConfig = {
+        broker: 'mqtt.example.com',
+        clientId: 'test-client',
+        certificates: {
+          clientCert: '/path/to/cert',
+          privateKeyAlias: 'alias',
+          rootCa: '/path/to/ca',
+          useHardwareKey: false,
+        },
+        onMessage: mockCallback,
+      };
+
+      mqttManager.connect(config);
+
+      const { NativeEventEmitter } = require('react-native');
+      const emitterInstance = NativeEventEmitter.mock.results[0].value;
+      const messageListener = emitterInstance.addListener.mock.calls.find(
+        (call: any[]) => call[0] === 'MqttMessage'
+      )[1];
+
+      messageListener({
+        topic: 'test/topic',
+        message: 'replayed',
+        isBinary: false,
+        isRetained: true,
+        qos: 1,
+      });
+
+      expect(mockCallback).toHaveBeenCalledWith(
+        expect.objectContaining({ isRetained: true })
+      );
+
+      messageListener({
+        topic: 'test/topic',
+        message: 'live',
+        isBinary: false,
+        isRetained: false,
+        qos: 1,
+      });
+
+      expect(mockCallback).toHaveBeenLastCalledWith(
+        expect.objectContaining({ isRetained: false })
+      );
+    });
+
+    // /network/ topics are binary, and that branch keeps isRetained only because it mutates the
+    // event in place — rebuilding the object there would drop the flag silently.
+    it('should forward isRetained on the binary path, where Base64 decoding rewrites the message', () => {
+      const mockCallback = jest.fn();
+      const config: MqttConfig = {
+        broker: 'mqtt.example.com',
+        clientId: 'test-client',
+        certificates: {
+          clientCert: '/path/to/cert',
+          privateKeyAlias: 'alias',
+          rootCa: '/path/to/ca',
+          useHardwareKey: false,
+        },
+        onMessage: mockCallback,
+      };
+
+      mqttManager.connect(config);
+
+      const { NativeEventEmitter } = require('react-native');
+      const emitterInstance = NativeEventEmitter.mock.results[0].value;
+      const messageListener = emitterInstance.addListener.mock.calls.find(
+        (call: any[]) => call[0] === 'MqttMessage'
+      )[1];
+
+      messageListener({
+        topic: 'penguin/network/state',
+        message: 'AAEC',
+        isBinary: true,
+        isRetained: true,
+        qos: 1,
+      });
+
+      expect(mockCallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isRetained: true,
+          message: expect.any(Uint8Array),
+        })
+      );
+    });
+  });
+
   describe('Binary Message Decoding', () => {
     it('should decode Base64 binary messages to Uint8Array', () => {
       const mockCallback = jest.fn();

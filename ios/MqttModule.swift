@@ -865,9 +865,12 @@ extension MqttModule: CocoaMQTTDelegate {
         let payloadData = Data(message.payload)
         let isBinary = self.isBinaryData(topic: message.topic, data: payloadData)
 
+        // A retained message is a replay from the broker's store on subscribe, not an answer to a
+        // request the app just sent. Consumers need to tell them apart.
         var eventBody: [String: Any] = [
             "topic": message.topic,
-            "qos": message.qos.rawValue
+            "qos": message.qos.rawValue,
+            "isRetained": message.retained
         ]
 
         if isBinary {

@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-08-24
+
+### Added
+
+- **`isRetained` on the inbound `MqttMessage` event**
+  - The native modules dropped the MQTT retain flag when building the bridge event, so a consumer
+    could not tell a live delivery from a replay the broker serves out of its retained store on
+    subscribe. That replay may predate the current session entirely — a reboot, a factory reset, or
+    another gateway — and a consumer treating it as an answer to a request it just sent will act on
+    stale state.
+  - Per MQTT 3.1.1 a broker clears the flag when forwarding to an already-established subscription
+    and sets it only when serving from the retained store, so the flag is a reliable discriminator.
+  - Forwarded on both platforms: Android reads `MqttMessage.isRetained()`, iOS reads
+    `CocoaMQTTMessage.retained`. The field is optional, so consumers on older versions are
+    unaffected and consumers that ignore it behave as before.
+
 ## [1.4.1] - 2026-08-19
 
 ### Fixed

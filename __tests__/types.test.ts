@@ -59,6 +59,32 @@ describe('Type Definitions', () => {
       expect(message3.isBinary).toBeUndefined();
     });
 
+    it('should have optional isRetained flag', () => {
+      const replay: MqttMessage = {
+        topic: 'test/topic',
+        message: 'text',
+        qos: 1,
+        isRetained: true,
+      };
+
+      const liveDelivery: MqttMessage = {
+        topic: 'test/topic',
+        message: 'text',
+        qos: 1,
+        isRetained: false,
+      };
+
+      const olderLibraryVersion: MqttMessage = {
+        topic: 'test/topic',
+        message: 'text',
+        qos: 1,
+      };
+
+      expect(replay.isRetained).toBe(true);
+      expect(liveDelivery.isRetained).toBe(false);
+      expect(olderLibraryVersion.isRetained).toBeUndefined();
+    });
+
     it('should support all QoS levels', () => {
       const qos0: MqttMessage = {
         topic: 'test',
