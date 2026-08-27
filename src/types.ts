@@ -117,3 +117,75 @@ export interface MqttContextType {
     retained?: boolean,
   ) => Promise<void>;
 }
+
+/**
+ * The native module surface, as `RCT_EXTERN_METHOD` declares it in ios/MqttModule.m and
+ * `@ReactMethod` declares it in the Android MqttModule.java. Argument order must match both.
+ *
+ * This is the single declaration. `index.d.ts` re-exports it and src/MqttModule.ts types the
+ * native module with it, so the two cannot drift. `__tests__/native-bridge-parity.test.ts`
+ * compares the method names and argument counts here against both native modules.
+ */
+export interface MqttModuleType {
+  /**
+   * iOS reads the client key from the Keychain, so it takes 7 arguments and 2 callbacks. Android
+   * builds a keystore and takes 3 more. MqttManager branches on `Platform.OS` to pick one.
+   */
+  connect(
+    broker: string,
+    clientId: string,
+    certificates: MqttCertificates,
+    sniHostname: string | null,
+    brokerIp: string | null,
+    brokerCommonName: string | null,
+    isAdminUser: boolean,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  connect(
+    broker: string,
+    clientId: string,
+    certificates: MqttCertificates,
+    sniHostname: string | null,
+    brokerIp: string | null,
+    brokerCommonName: string | null,
+    isAdminUser: boolean,
+    keystorePath: string | null,
+    keystorePassword: string | null,
+    keystoreFormat: string | null,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  disconnect(
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  cleanup(
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  subscribe(
+    topic: string,
+    qos: number,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  unsubscribe(
+    topic: string,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  /**
+   * `message` is a string because the native side takes `NSString`. MqttManager Base64-encodes
+   * binary payloads and prefixes them with `B64:` before calling this.
+   */
+  publish(
+    topic: string,
+    message: string,
+    qos: number,
+    retained: boolean,
+    successCallback: (message: string) => void,
+    errorCallback: (error: string) => void,
+  ): void;
+  isConnected(callback: (isConnected: boolean) => void): void;
+}

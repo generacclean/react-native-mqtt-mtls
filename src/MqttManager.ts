@@ -277,7 +277,8 @@ export class MqttManager {
     retained: boolean = false,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      let publishMessage: string | Uint8Array = message as any;
+      // The native side takes a string, so every branch below produces one.
+      let publishMessage: string;
 
       // Check if Buffer is available in the environment
       const isBuffer =
@@ -319,6 +320,8 @@ export class MqttManager {
         });
       } else if (typeof message !== "string") {
         publishMessage = JSON.stringify(message);
+      } else {
+        publishMessage = message;
       }
 
       MqttModule.publish(
