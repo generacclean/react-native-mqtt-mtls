@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-08-26
+
+### Fixed
+
+- **`cleanup` was missing from the JS module on iOS**
+  - Every app start logged `The Objective-C cleanup:(RCTResponseSenderBlock)successCallback
+errorCallback:(RCTResponseSenderBlock)errorCallback method signature for the JS method cleanup
+can not be found in the Objective-C definition of the MqttModule module.` React Native then
+    dropped the method, so `MqttModule.cleanup` was `undefined` on iOS.
+  - Root cause: `RCT_EXTERN_MODULE` splits the module in two. `MqttModule.m` declared the selector
+    `cleanup:errorCallback:`, while `MqttModule.swift` implemented `func cleanup(_ callback:)`,
+    which exports `cleanup:`. React Native reads the declaration, asks the class for that selector,
+    finds nothing, and skips the method. The mismatch is invisible at compile time because the two
+    halves never reference each other.
+  - The Swift signature now takes both callbacks, matching the declaration, the Android module, and
+    the `MqttModuleType` interface. `errorCallback` stays unused because nothing in the cleanup path
+    can fail, the same as `disconnect`.
+  - Effect on callers: `MqttManager` and `MqttProvider` both guard with
+    `typeof MqttModule.cleanup === "function"` and fall back to `disconnect`, which runs the same
+    teardown, so iOS behaviour does not change. iOS now runs the intended path and stops warning.
+
+- **`MqttModuleType` was declared twice and the two copies had drifted**
+  - `src/MqttModule.ts` kept a private copy that listed `cleanup`; the published copy in `index.d.ts`
+    did not. That is how the omission above reached consumers. `index.d.ts` already carried the rule
+    it broke: re-export from `src/types.ts` to prevent type drift.
+  - `MqttModuleType` now lives in `src/types.ts` only. `index.d.ts` re-exports it and
+    `src/MqttModule.ts` imports it, so there is one declaration and nothing to drift.
+  - The merge kept the correct half of each copy. `connect` keeps the two overloads from
+    `src/MqttModule.ts`, because iOS takes 7 arguments and Android takes 10; the single 12-argument
+    signature in `index.d.ts` rejected the iOS call. `publish` keeps `message: string` from
+    `index.d.ts`, because `MqttManager` Base64-encodes binary before the call and the native side
+    takes `NSString`; `string | Uint8Array` would have let a `Uint8Array` cross the bridge.
+
+### Added
+
+- `__tests__/native-bridge-parity.test.ts` reads `MqttModule.m`, `MqttModule.swift`, `src/types.ts`
+  and the Android module as text and compares the exported selectors, the method sets and the
+  argument counts. It fails on both bugs above.
+- A `Jest` workflow, so the JavaScript suite runs on every pull request. Android and iOS trust
+  validation already had one; JavaScript did not, so the parity test above would never have run.
+
+### Changed
+
+- `MqttManager.publish` types its local `publishMessage` as `string` instead of
+  `string | Uint8Array`. Every branch already produced a string; the wider type needed an `as any`
+  that hid the mismatch with the native `NSString` argument.
+
 ## [1.5.0] - 2026-08-24
 
 ### Added

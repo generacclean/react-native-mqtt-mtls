@@ -7,6 +7,7 @@ export type {
   MqttCertificates,
   MqttConfig,
   MqttContextType,
+  MqttModuleType,
 } from "./src/types";
 
 export interface MqttProviderProps {
@@ -35,51 +36,5 @@ export class MqttManager {
   cleanup(): void;
 }
 
-/**
- * Native MQTT Module interface
- * Parameter order matches iOS/Android native implementations:
- * broker, clientId, certificates, sniHostname, brokerIp, brokerCommonName, isAdminUser, successCallback, errorCallback
- */
-export interface MqttModuleType {
-  connect(
-    broker: string,
-    clientId: string,
-    certificates: import("./src/types").MqttCertificates,
-    sniHostname: string | null,
-    brokerIp: string | null,
-    brokerCommonName: string | null,
-    isAdminUser: boolean,
-    keystorePath: string | null,
-    keystorePassword: string | null,
-    keystoreFormat: string | null,
-    successCallback: (message: string) => void,
-    errorCallback: (error: string) => void,
-  ): void;
-  disconnect(
-    successCallback: (message: string) => void,
-    errorCallback: (error: string) => void,
-  ): void;
-  subscribe(
-    topic: string,
-    qos: number,
-    successCallback: (message: string) => void,
-    errorCallback: (error: string) => void,
-  ): void;
-  unsubscribe(
-    topic: string,
-    successCallback: (message: string) => void,
-    errorCallback: (error: string) => void,
-  ): void;
-  publish(
-    topic: string,
-    message: string,
-    qos: number,
-    retained: boolean,
-    successCallback: (message: string) => void,
-    errorCallback: (error: string) => void,
-  ): void;
-  isConnected(callback: (isConnected: boolean) => void): void;
-}
-
-declare const MqttModule: MqttModuleType;
+declare const MqttModule: import("./src/types").MqttModuleType;
 export default MqttModule;
