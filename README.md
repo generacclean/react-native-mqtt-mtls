@@ -257,7 +257,7 @@ When `isAdminUser` is `false` (or omitted), the library enforces **full certific
 - ✅ SNI hostname verification, **Android only** (requires `sniHostname` in config): the value is
   matched against the broker certificate's subjectAltName entries (DNS and iPAddress, exact match,
   no wildcards). On iOS `sniHostname` is only announced as the TLS SNI hostname — trust evaluation
-  uses `SecPolicyCreateSSL(true, nil)` with no hostname, so no SAN check runs there and
+  uses `SecPolicyCreateBasicX509()`, which carries no hostname check, so no SAN check runs there and
   `brokerCommonName` is the only iOS identity pin.
 - ✅ Broker Common Name pinning (requires `brokerCommonName` in config)
 - ✅ Complete TLS handshake validation

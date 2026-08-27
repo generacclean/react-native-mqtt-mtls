@@ -52,8 +52,8 @@ export interface MqttConfig {
    *   iPAddress, exact match, no wildcards), so connecting by IP requires that IP in the SAN list.
    *   It is not sent as the TLS SNI extension.
    * - iOS sends it as the announced SNI hostname (`kCFStreamSSLPeerName`) only. Trust evaluation
-   *   uses `SecPolicyCreateSSL(true, nil)` with no hostname, so no SAN match is performed and
-   *   `brokerCommonName` is the only iOS identity pin.
+   *   uses `SecPolicyCreateBasicX509()`, which carries no hostname check, so no SAN match is
+   *   performed and `brokerCommonName` is the only iOS identity pin.
    */
   sniHostname?: string;
   /**

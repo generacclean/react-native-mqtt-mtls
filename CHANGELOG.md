@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.2] - 2026-08-27
+
+### Fixed
+
+- **iOS could not complete the MQTT TLS handshake against a real gateway ("certificate is not
+  standards compliant")**
+  - The handshake reached the trust delegate, which rejected the chain with
+    `Trust evaluate failure: [leaf OtherTrustValidityPeriod]`. Android accepted the same
+    certificates.
+  - Root cause: `TrustValidator.evaluate` used `SecPolicyCreateSSL(true, nil)`, and the SSL policy
+    enforces Apple's maximum lifetime rule for TLS server certificates — 398 days for anything
+    issued after 2020-09-01 ([HT211025](https://support.apple.com/en-us/HT211025)). Broker leaves
+    are long-lived device certificates, so the rule rejects a genuine gateway. Java PKIX has no such
+    rule, which is why Android was unaffected.
+  - The policy is now `SecPolicyCreateBasicX509()`, which still enforces chain construction,
+    signature verification, expiry, basic constraints, and weak key/signature rejection. Neither
+    policy carried a hostname check here (`nil` host); CN pinning remains the hostname-equivalent
+    control.
+
+### Known gap
+
+- **iOS no longer enforces `id-kp-serverAuth` on the server leaf**
+  ([IA-6160](https://generacet.atlassian.net/browse/IA-6160)). The SSL policy was the only thing
+  checking extended key usage; basic X.509 does not check it. Because device client certificates
+  chain to the same CA as the broker, one presented as the server would now be accepted whenever
+  the CN pin is skipped — which is every production connection today, since the app forces admin
+  mode. iOS server identity therefore rests on a single check: the chain reaches an app-supplied
+  anchor. No hostname, no SAN, no CN, no EKU. Android still closes this in
+  `CustomTrustManager.requireTlsServerCertificate`, so **iOS is the more permissive platform until
+  IA-6160 lands** — weigh that before taking this bump.
+
 ## [1.5.1] - 2026-08-26
 
 ### Fixed

@@ -26,7 +26,9 @@ import static org.junit.Assert.*;
  *   basic-constraints, and signature checks.
  * - The leaf is a TLS server certificate: a clientAuth-only certificate from the same CA is
  *   rejected even in admin mode, where neither identity pin runs, and so are the two leaves
- *   Apple's SSL policy also refuses — no extendedKeyUsage at all, and anyExtendedKeyUsage.
+ *   Apple's SSL policy used to refuse — no extendedKeyUsage at all, and anyExtendedKeyUsage.
+ *   iOS dropped that policy in 1.5.2 and enforces no EKU rule today (IA-6160), so these three
+ *   cases are Android-only for now rather than shared behaviour.
  * - Hostname/SAN matching against the expected SNI host is enforced when configured.
  * - isAdminUser semantics: chain validation always runs; CN and hostname/SAN pinning
  *   are skipped only when expectedBrokerCN / expectedSniHost are null (admin mode).
@@ -172,7 +174,8 @@ public class CustomTrustManagerTest {
             + "-----END CERTIFICATE-----\n";
 
     // Same CA and SANs, no extendedKeyUsage extension at all. RFC 5280 leaves such a leaf
-    // unconstrained, but Apple's SSL policy rejects it, so this library does too.
+    // unconstrained, but Apple's SSL policy rejected it, so this library does too. iOS itself no
+    // longer applies that policy — see IA-6160.
     private static final String NO_EKU_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
             + "MIIB6zCCAXGgAwIBAgIBEzAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
             + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow\n"
@@ -188,7 +191,7 @@ public class CustomTrustManagerTest {
             + "-----END CERTIFICATE-----\n";
 
     // Same CA and SANs, extendedKeyUsage = anyExtendedKeyUsage (2.5.29.37.0) alone. It claims
-    // every purpose rather than naming serverAuth, which Apple's SSL policy also rejects.
+    // every purpose rather than naming serverAuth, which Apple's SSL policy also rejected.
     private static final String ANY_EKU_LEAF_PEM = "-----BEGIN CERTIFICATE-----\n"
             + "MIIB/TCCAYSgAwIBAgIBFDAKBggqhkjOPQQDAzAhMR8wHQYDVQQDDBZQZW5ndWlu\n"
             + "IFRFU1QgRGV2aWNlIENBMB4XDTI2MDgxMjIwMjMwM1oXDTI4MTAyMDIwMjMwM1ow\n"
@@ -366,9 +369,10 @@ public class CustomTrustManagerTest {
     @Test
     public void testServerCertificateWithNoEKUExtension_Rejected() throws Exception {
         // RFC 5280 leaves a leaf with no extendedKeyUsage extension unconstrained, so PKIX accepts
-        // it. Apple's SSL policy does not — SecPolicyCreateSSL(true, nil) fails it with "Extended
-        // key usage does not match certificate usage" — so accepting it here would be an
-        // Android-only relaxation on a broker the iOS build cannot reach anyway.
+        // it. Apple's SSL policy did not — SecPolicyCreateSSL(true, nil) failed it with "Extended
+        // key usage does not match certificate usage" — and this library keeps that stricter
+        // reading. iOS dropped the SSL policy in 1.5.2 and would now accept such a broker, which
+        // IA-6160 will close; that makes this the shared intent, not a match to current iOS.
         X509Certificate ca = cert(DEVICE_CA_PEM);
         X509Certificate noEkuLeaf = cert(NO_EKU_LEAF_PEM);
 
@@ -385,9 +389,10 @@ public class CustomTrustManagerTest {
 
     @Test
     public void testServerCertificateWithAnyExtendedKeyUsage_Rejected() throws Exception {
-        // anyExtendedKeyUsage claims every purpose instead of naming serverAuth. Apple rejects it
-        // for the same reason as the no-EKU case, so this library requires id-kp-serverAuth
-        // explicitly rather than treating the any-purpose OID as a substitute.
+        // anyExtendedKeyUsage claims every purpose instead of naming serverAuth. Apple's SSL policy
+        // rejected it for the same reason as the no-EKU case, so this library requires
+        // id-kp-serverAuth explicitly rather than treating the any-purpose OID as a substitute.
+        // As above, current iOS enforces neither case until IA-6160 lands.
         X509Certificate ca = cert(DEVICE_CA_PEM);
         X509Certificate anyEkuLeaf = cert(ANY_EKU_LEAF_PEM);
 
