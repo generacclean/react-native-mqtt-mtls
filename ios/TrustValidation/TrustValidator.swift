@@ -43,14 +43,17 @@ enum TrustValidator {
         // Basic X.509 still enforces chain construction, signature verification, expiry, basic
         // constraints, and weak key/signature rejection. It carries no hostname check, but neither
         // did the SSL policy as configured here (nil host) — CN pinning below is our
-        // hostname-equivalent control, and it must stay skippable for admin users.
+        // hostname-equivalent control, and it must stay skippable when no CN is configured.
         //
-        // Known gap: basic X.509 performs no extendedKeyUsage check, so unlike Android — see
-        // CustomTrustManager.requireTlsServerCertificate — a leaf that does not assert
+        // Known gap (IA-6160): basic X.509 performs no extendedKeyUsage check, so unlike Android —
+        // see CustomTrustManager.requireTlsServerCertificate — a leaf that does not assert
         // id-kp-serverAuth is accepted here. Since device client certificates chain to the same CA
-        // as the broker, one presented as the server would pass for an admin user, who has no CN to
-        // pin against. Reinstating the check means reading the extension out of the certificate DER;
-        // there is no public cross-platform Security API for it.
+        // as the broker, one presented as the server would pass for any caller with no configured
+        // CN, which today is every production connection: the app forces admin mode. That leaves
+        // iOS server identity resting on one check — the chain reaches an app-supplied anchor —
+        // with no hostname, SAN, CN, or EKU behind it, and makes iOS the more permissive of the two
+        // platforms until IA-6160 lands. Reinstating the check means reading the extension out of
+        // the certificate DER; there is no public cross-platform Security API for it.
         let policy = SecPolicyCreateBasicX509()
 
         // Every one of these setters has to take effect before the evaluation below means

@@ -23,11 +23,15 @@ All notable changes to this project will be documented in this file.
 
 ### Known gap
 
-- **iOS no longer enforces `id-kp-serverAuth` on the server leaf.** The SSL policy was the only
-  thing checking extended key usage; basic X.509 does not check it. Because device client
-  certificates chain to the same CA as the broker, one presented as the server would now be
-  accepted for an admin user, where CN pinning is skipped. Android still closes this in
-  `CustomTrustManager.requireTlsServerCertificate`. Reinstating the check on iOS follows separately.
+- **iOS no longer enforces `id-kp-serverAuth` on the server leaf**
+  ([IA-6160](https://generacet.atlassian.net/browse/IA-6160)). The SSL policy was the only thing
+  checking extended key usage; basic X.509 does not check it. Because device client certificates
+  chain to the same CA as the broker, one presented as the server would now be accepted whenever
+  the CN pin is skipped — which is every production connection today, since the app forces admin
+  mode. iOS server identity therefore rests on a single check: the chain reaches an app-supplied
+  anchor. No hostname, no SAN, no CN, no EKU. Android still closes this in
+  `CustomTrustManager.requireTlsServerCertificate`, so **iOS is the more permissive platform until
+  IA-6160 lands** — weigh that before taking this bump.
 
 ## [1.5.1] - 2026-08-26
 

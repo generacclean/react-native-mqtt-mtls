@@ -577,14 +577,21 @@ public class MqttModule extends ReactContextBaseJavaModule {
          * leaf's purpose. Every device holds a *client* certificate from the same gateway CA, so
          * without this check one of those would pass as the broker whenever the CN and SAN pins
          * are skipped — which is every production connection today, since the app forces admin
-         * mode. This is the check iOS gets from SecPolicyCreateSSL(true, nil).
+         * mode.
          *
-         * Two cases are rejected for parity with that iOS policy rather than because PKIX asks
-         * for it. A leaf with no extendedKeyUsage extension at all is unconstrained as far as
-         * RFC 5280 is concerned, and a leaf asserting anyExtendedKeyUsage (2.5.29.37.0) claims
-         * every purpose — but Apple's SSL policy rejects both with "Extended key usage does not
-         * match certificate usage", so a broker that presents either cannot be reached from the
-         * iOS build today and accepting it here would be an Android-only relaxation.
+         * iOS no longer has an equivalent. It used to get this check for free from
+         * SecPolicyCreateSSL(true, nil), but TrustValidator moved to SecPolicyCreateBasicX509()
+         * in 1.5.2 to escape Apple's 398-day maximum-lifetime rule, and basic X.509 performs no
+         * extendedKeyUsage check at all. Android is therefore the stricter platform until IA-6160
+         * reinstates the check on iOS via a DER parser. Do not relax anything here on the
+         * assumption that iOS covers it.
+         *
+         * Two cases are rejected because the original iOS policy rejected them, rather than
+         * because PKIX asks for it. A leaf with no extendedKeyUsage extension at all is
+         * unconstrained as far as RFC 5280 is concerned, and a leaf asserting anyExtendedKeyUsage
+         * (2.5.29.37.0) claims every purpose — but Apple's SSL policy failed both with "Extended
+         * key usage does not match certificate usage", so rejecting them keeps the semantics the
+         * two platforms were written to share, and is what IA-6160 will restore on iOS.
          */
         private void requireTlsServerCertificate(X509Certificate leaf) throws CertificateException {
             List<String> purposes;

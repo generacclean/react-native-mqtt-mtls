@@ -86,10 +86,15 @@ React Native and CocoaMQTT so SwiftPM can build it on its own; `MqttModule.swift
 
 **What it tests** (15 tests): chain validation against app-provided anchors with system roots
 excluded, rejection of a self-signed impostor and of an expired leaf, fail-closed behaviour when no
-anchors are configured, CN pinning (match, mismatch, and skipped for admin users), and what Apple's
-`SecPolicyCreateSSL(true, nil)` policy does with each `extendedKeyUsage` value — `serverAuth`
-accepted, and `clientAuth`, no EKU extension, and `anyExtendedKeyUsage` all rejected. Those last
-three pin the behaviour the Android EKU check is written to match.
+anchors are configured, CN pinning (match, mismatch, and skipped when no CN is configured), and the
+four `extendedKeyUsage` cases the Android EKU check is written around — `serverAuth` accepted, and
+`clientAuth`, no EKU extension, and `anyExtendedKeyUsage` all rejected.
+
+Those last three do **not** describe current iOS behaviour. `TrustValidator` uses
+`SecPolicyCreateBasicX509()`, which performs no EKU check, so all three are marked
+`XCTExpectFailure` pending [IA-6160](https://generacet.atlassian.net/browse/IA-6160). They are kept
+as the specification: `swift test` reports them as expected failures today, and they flip to a hard
+"unexpectedly passed" the moment the check is reinstated.
 
 The fixtures are the same openssl-generated chain as the Android suite, so a change in one platform's
 expectations is visible against the other's.

@@ -43,8 +43,11 @@ final class TrustValidatorTests: XCTestCase {
     -----END CERTIFICATE-----
     """
 
-    // Broker leaf: 800-day validity (> Apple's 398-day system-root cap), SANs
-    // localhost/127.0.0.1/10.0.2.2, signed by the intermediate above.
+    // Broker leaf: 800-day validity — longer than the 398 days Apple's SSL policy allows a TLS
+    // server certificate issued after 2020-09-01. That rule is not limited to system roots:
+    // restricting evaluation to our own anchors does not exempt a certificate from it, which is why
+    // TrustValidator uses a basic X.509 policy instead. SANs localhost/127.0.0.1/10.0.2.2, signed
+    // by the intermediate above.
     private static let brokerPEM = """
     -----BEGIN CERTIFICATE-----
     MIICGDCCAZ6gAwIBAgIURuVk+C+dQXYyxWfnCjFCddBH3XYwCgYIKoZIzj0EAwMw
@@ -99,8 +102,9 @@ final class TrustValidatorTests: XCTestCase {
 
     // A second self-signed CA, standing in for the gateway CA that issues both broker and device
     // certificates. The four leaves below are identical apart from extendedKeyUsage, so the EKU
-    // tests turn on that extension alone. They pin what Apple's SSL policy does with each value,
-    // which is what CustomTrustManager.requireTlsServerCertificate matches on Android.
+    // tests turn on that extension alone. They pin what Android enforces in
+    // CustomTrustManager.requireTlsServerCertificate — semantics originally taken from Apple's SSL
+    // policy, which iOS no longer applies. See the section note above those tests.
     private static let deviceCAPEM = """
     -----BEGIN CERTIFICATE-----
     MIIB4zCCAWqgAwIBAgIUezpkTnymbnI0nMn3hJ0aXJYdtvAwCgYIKoZIzj0EAwMw
@@ -200,6 +204,11 @@ final class TrustValidatorTests: XCTestCase {
 
     /// Builds a SecTrust object presenting `leafAndChain` as the server's certificate chain,
     /// mirroring what CocoaMQTT hands the delegate during a real TLS handshake.
+    ///
+    /// The SSL policy here is deliberate, not a leftover from before the basic X.509 switch: it is
+    /// what CocoaMQTT uses to build the trust object, and modelling that is the point of this
+    /// fixture. `TrustValidator.evaluate` replaces it via `SecTrustSetPolicies` as its first act,
+    /// so nothing under test evaluates against this policy.
     private static func makeTrust(presenting leafAndChain: [SecCertificate]) -> SecTrust {
         var trust: SecTrust?
         let policy = SecPolicyCreateSSL(true, nil)
@@ -220,14 +229,16 @@ final class TrustValidatorTests: XCTestCase {
         let trust = Self.makeTrust(presenting: [broker, intermediate])
 
         // No CN configured, so chain validation is all that applies.
-        // The leaf is deliberately valid for 800 days: real Penguin broker certificates are
-        // long-lived, and the basic X.509 policy TrustValidator uses must accept that. An SSL
-        // policy would not — it enforces Apple's 398-day maximum lifetime rule and rejects with
-        // "Certificate exceeds maximum temporal validity period". Restricting the anchors to our
-        // own root does not exempt us from that rule, so the policy choice is what this asserts.
         //
-        // Caveat: a macOS test host does not appear to enforce the maximum-lifetime rule, so this
-        // passing under `swift test` is necessary but not sufficient — only a device run proves it.
+        // The leaf is deliberately valid for 800 days. This case records the requirement rather
+        // than proving it: real Penguin broker certificates are long-lived, so whatever policy
+        // TrustValidator uses has to accept one. An SSL policy does not — it enforces Apple's
+        // 398-day maximum lifetime rule and rejects with "Certificate exceeds maximum temporal
+        // validity period", and restricting the anchors to our own root does not exempt us.
+        //
+        // On this test host the assertion below only exercises chain validation: a macOS host does
+        // not appear to enforce the maximum-lifetime rule, so it passes under either policy. Only a
+        // physical-device run against a real gateway tests the policy choice itself.
         let result = evaluate(trust, expectedCN: nil, anchors: [root])
 
         XCTAssertTrue(result, "Valid chain to app-provided root anchor should be trusted, even with >398-day leaf")
@@ -370,6 +381,9 @@ final class TrustValidatorTests: XCTestCase {
     // so the three rejections below are marked as known failures rather than deleted — they are the
     // specification, and they flip to a hard "unexpectedly passed" the moment the check is added.
     // Only testServerAuthLeaf_Trusted holds today, and it holds for chain reasons alone.
+    //
+    // Tracked as IA-6160. The XCTExpectFailure calls take the closure form deliberately: the bare
+    // form covers the rest of the method, so anything appended later would be absorbed silently.
 
     func testServerAuthLeaf_Trusted() {
         let leaf = Self.certificate(fromPEM: Self.deviceServerAuthLeafPEM)
@@ -387,9 +401,10 @@ final class TrustValidatorTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [leaf])
 
-        XCTExpectFailure("iOS performs no extendedKeyUsage check — see the note above this section")
-        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
-                       "A device's own clientAuth certificate must not be accepted as the broker")
+        XCTExpectFailure("IA-6160: iOS performs no extendedKeyUsage check — see the note above this section") {
+            XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                           "A device's own clientAuth certificate must not be accepted as the broker")
+        }
     }
 
     func testLeafWithNoExtendedKeyUsage_Rejected() {
@@ -398,9 +413,10 @@ final class TrustValidatorTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [leaf])
 
-        XCTExpectFailure("iOS performs no extendedKeyUsage check — see the note above this section")
-        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
-                       "An explicit serverAuth EKU is required: absent EKU is not treated as unrestricted")
+        XCTExpectFailure("IA-6160: iOS performs no extendedKeyUsage check — see the note above this section") {
+            XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                           "An explicit serverAuth EKU is required: absent EKU is not treated as unrestricted")
+        }
     }
 
     func testLeafWithAnyExtendedKeyUsage_Rejected() {
@@ -409,9 +425,10 @@ final class TrustValidatorTests: XCTestCase {
 
         let trust = Self.makeTrust(presenting: [leaf])
 
-        XCTExpectFailure("iOS performs no extendedKeyUsage check — see the note above this section")
-        XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
-                       "anyExtendedKeyUsage is not a substitute for serverAuth")
+        XCTExpectFailure("IA-6160: iOS performs no extendedKeyUsage check — see the note above this section") {
+            XCTAssertFalse(evaluate(trust, expectedCN: nil, anchors: [ca]),
+                           "anyExtendedKeyUsage is not a substitute for serverAuth")
+        }
     }
 
 }
