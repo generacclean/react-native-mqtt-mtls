@@ -26,14 +26,32 @@ enum TrustValidator {
                          log: OSLog) -> Bool {
         // STEP 1: Validate the server's certificate chain against our app-provided root CA(s).
         // This runs unconditionally, admin or not — an unset CN only ever skips the pin below.
-        // The policy carries no built-in hostname check (nil host): CN pinning below is our
-        // hostname-equivalent control, and it must stay skippable for admin users.
         guard !anchors.isEmpty else {
             os_log("  ✗ No trusted root CA certificates configured — rejecting", log: log, type: .error)
             return false
         }
 
-        let policy = SecPolicyCreateSSL(true, nil)
+        // Basic X.509 rather than an SSL policy: the SSL policy bundle enforces Apple's maximum
+        // lifetime rule for TLS server certificates — 398 days for anything issued after
+        // 2020-09-01 (https://support.apple.com/en-us/HT211025). Penguin broker leaves are
+        // long-lived device certificates, so on iOS that rule rejects a genuine gateway with
+        // "Certificate exceeds maximum temporal validity period" before the handshake completes.
+        // Restricting the anchors does not exempt us: Apple's carve-out covers roots installed in
+        // the keychain with explicit trust settings, not anchors handed to
+        // SecTrustSetAnchorCertificates.
+        //
+        // Basic X.509 still enforces chain construction, signature verification, expiry, basic
+        // constraints, and weak key/signature rejection. It carries no hostname check, but neither
+        // did the SSL policy as configured here (nil host) — CN pinning below is our
+        // hostname-equivalent control, and it must stay skippable for admin users.
+        //
+        // Known gap: basic X.509 performs no extendedKeyUsage check, so unlike Android — see
+        // CustomTrustManager.requireTlsServerCertificate — a leaf that does not assert
+        // id-kp-serverAuth is accepted here. Since device client certificates chain to the same CA
+        // as the broker, one presented as the server would pass for an admin user, who has no CN to
+        // pin against. Reinstating the check means reading the extension out of the certificate DER;
+        // there is no public cross-platform Security API for it.
+        let policy = SecPolicyCreateBasicX509()
 
         // Every one of these setters has to take effect before the evaluation below means
         // anything, so their OSStatus is checked rather than discarded. Discarding them fails
