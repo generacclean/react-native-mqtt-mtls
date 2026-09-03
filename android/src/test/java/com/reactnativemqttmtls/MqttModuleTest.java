@@ -12,9 +12,13 @@ import org.mockito.MockitoAnnotations;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 
+import com.facebook.react.modules.core.DeviceEventManagerModule;
+
 import info.mqtt.android.service.MqttAndroidClient;
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -615,8 +619,117 @@ public class MqttModuleTest {
     }
 
     /**
+     * Per-attempt callback identity — a stale emission is indistinguishable from a live one by the
+     * time it reaches JS, so these assert it never gets there.
+     */
+
+    @Test
+    public void testReleaseClientResources_DetachesCallbackFromReleasedClient() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        setClient(mockClient);
+
+        // Dropping our reference does not stop this client dispatching — the receiver it registered
+        // and its service binding keep it alive — so the callback has to be detached explicitly.
+        releaseClientResources(mockClient);
+
+        verify(mockClient).setCallback(null);
+    }
+
+    @Test
+    public void testAttemptCallback_ConnectCompleteFromSupersededClientEmitsNothing() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        setClient(mock(MqttAndroidClient.class));
+
+        callback.connectComplete(false, "ssl://broker:8883");
+
+        // Ungated this flips the JS connected flag and calls the live attempt's onConnect
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testAttemptCallback_ConnectionLostFromSupersededClientEmitsNothing() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        setClient(mock(MqttAndroidClient.class));
+
+        callback.connectionLost(new RuntimeException("socket closed"));
+
+        // The worst of the four: ungated, the app tears down a connection that is alive
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testAttemptCallback_MessageFromSupersededClientIsDropped() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        setClient(mock(MqttAndroidClient.class));
+
+        callback.messageArrived("generac/proto/device", new MqttMessage(new byte[] {0x38, 0x01}));
+
+        // Ungated this injects a dead client's traffic into the live subscription stream. Only the
+        // stale path is asserted: the live path reaches Arguments.createMap(), which needs the RN
+        // JNI bridge and cannot run under Robolectric.
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testAttemptCallback_DeliveryCompleteFromSupersededClientEmitsNothing() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        setClient(mock(MqttAndroidClient.class));
+
+        callback.deliveryComplete(null);
+
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testAttemptCallback_CurrentClientStillEmits() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(currentClient);
+        setClient(currentClient);
+
+        // The gate must not silence the attempt that owns the connection
+        callback.connectComplete(false, "ssl://broker:8883");
+        callback.connectionLost(new RuntimeException("socket closed"));
+        callback.deliveryComplete(null);
+
+        verify(emitter).emit(eq("MqttConnected"), any());
+        verify(emitter).emit(eq("MqttDisconnected"), any());
+        verify(emitter).emit(eq("MqttDeliveryComplete"), any());
+    }
+
+    @Test
+    public void testAttemptCallback_EmitsNothingOnceTheClientIsTornDown() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient client = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = mqttModule.createAttemptCallback(client);
+        setClient(client);
+
+        releaseClientResources(client);
+        callback.connectionLost(new RuntimeException("socket closed"));
+
+        // Teardown clears the field, so a callback already in flight when it ran finds no owner
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    /**
      * Reflection helpers — the teardown logic under test is private module state
      */
+
+    private DeviceEventManagerModule.RCTDeviceEventEmitter stubEmitter() {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter =
+                mock(DeviceEventManagerModule.RCTDeviceEventEmitter.class);
+        when(mockContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class))
+                .thenReturn(emitter);
+        return emitter;
+    }
 
     private void setClient(MqttAndroidClient value) throws Exception {
         Field field = MqttModule.class.getDeclaredField("client");

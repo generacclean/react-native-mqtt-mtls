@@ -347,10 +347,20 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * registered BroadcastReceiver and a bound service. The client is only forgotten if it is still
      * the current one: a disconnect callback can arrive after a new connection has replaced it, and
      * that new client must not be torn down by the old client's callback.
+     *
+     * The callback is detached first because dropping our reference does not stop this client
+     * dispatching — its registered BroadcastReceiver and service binding keep it alive. That covers
+     * the clean path; {@link #createAttemptCallback}'s guard covers a callback already in flight.
      */
     private void releaseClientResources(MqttAndroidClient disconnectedClient) {
         if (disconnectedClient == null) {
             return;
+        }
+
+        try {
+            disconnectedClient.setCallback(null);
+        } catch (Exception e) {
+            Log.w(TAG, "Callback detach error (non-critical): " + e.getMessage());
         }
 
         try {
@@ -364,6 +374,99 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 client = null;
             }
         }
+    }
+
+    /**
+     * Whether the given client is still the one this module owns. A stale emission is
+     * indistinguishable from a live one by the time it reaches JS, so it has to be caught here;
+     * under clientLock so no guard observes the field mid-teardown.
+     */
+    private boolean isCurrentClient(MqttAndroidClient candidate) {
+        if (candidate == null) {
+            return false;
+        }
+        synchronized (clientLock) {
+            return client == candidate;
+        }
+    }
+
+    /**
+     * Builds the event callback for one connect attempt, bound to the client that created it, every
+     * method gated on {@link #isCurrentClient}. Package-private rather than inline in connect() so a
+     * test can reach it without the real PKCS12 keystore createSSLContextFromKeystore() needs.
+     */
+    MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
+        return new MqttCallbackExtended() {
+            @Override
+            public void connectComplete(boolean reconnect, String serverURI) {
+                if (!isCurrentClient(attemptClient)) {
+                    Log.d(TAG, "Ignoring connectComplete from a superseded client");
+                    return;
+                }
+                Log.i(TAG, "MQTT connected to " + serverURI + (reconnect ? " (reconnected)" : ""));
+                sendEvent("MqttConnected", "Connected to broker: " + serverURI);
+            }
+
+            @Override
+            public void connectionLost(Throwable cause) {
+                String errorMsg = cause != null ? cause.getMessage() : "Unknown";
+                if (!isCurrentClient(attemptClient)) {
+                    Log.d(TAG, "Ignoring connectionLost from a superseded client: " + errorMsg);
+                    return;
+                }
+                Log.w(TAG, "MQTT connection lost: " + errorMsg);
+                sendEvent("MqttDisconnected", "Connection lost: " + errorMsg);
+            }
+
+            @Override
+            public void messageArrived(String topic, MqttMessage message) {
+                if (!isCurrentClient(attemptClient)) {
+                    Log.d(TAG, "Dropping message from a superseded client on topic " + topic);
+                    return;
+                }
+                try {
+                    byte[] payload = message.getPayload();
+                    boolean isBinary = isBinaryData(topic, payload);
+
+                    WritableMap eventData = Arguments.createMap();
+                    eventData.putString("topic", topic);
+                    // A retained message is a replay from the broker's store on subscribe, not
+                    // an answer to a request the app just sent. Consumers need to tell them apart.
+                    eventData.putBoolean("isRetained", message.isRetained());
+
+                    if (isBinary) {
+                        // Binary data: Base64 encode for transport over bridge
+                        String payloadBase64 = android.util.Base64.encodeToString(
+                                payload,
+                                android.util.Base64.NO_WRAP);
+                        eventData.putString("message", payloadBase64);
+                        eventData.putBoolean("isBinary", true);
+                        Log.d(TAG, "Received binary message on topic " + topic + " (" + payload.length + " bytes)");
+                    } else {
+                        // Text data: Send as UTF-8 string
+                        String messageStr = new String(payload, StandardCharsets.UTF_8);
+                        eventData.putString("message", messageStr);
+                        eventData.putBoolean("isBinary", false);
+                        Log.d(TAG, "Received text message on topic " + topic + " (" + payload.length + " bytes)");
+                    }
+
+                    reactContext
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                            .emit("MqttMessage", eventData);
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to process MQTT message on topic " + topic, e);
+                }
+            }
+
+            @Override
+            public void deliveryComplete(IMqttDeliveryToken token) {
+                if (!isCurrentClient(attemptClient)) {
+                    Log.d(TAG, "Ignoring deliveryComplete from a superseded client");
+                    return;
+                }
+                sendEvent("MqttDeliveryComplete", "Message delivered");
+            }
+        };
     }
 
     /**
@@ -882,61 +985,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
-            attemptClient.setCallback(new MqttCallbackExtended() {
-                @Override
-                public void connectComplete(boolean reconnect, String serverURI) {
-                    Log.i(TAG, "MQTT connected to " + serverURI + (reconnect ? " (reconnected)" : ""));
-                    sendEvent("MqttConnected", "Connected to broker: " + serverURI);
-                }
-
-                @Override
-                public void connectionLost(Throwable cause) {
-                    String errorMsg = cause != null ? cause.getMessage() : "Unknown";
-                    Log.w(TAG, "MQTT connection lost: " + errorMsg);
-                    sendEvent("MqttDisconnected", "Connection lost: " + errorMsg);
-                }
-
-                @Override
-                public void messageArrived(String topic, MqttMessage message) {
-                    try {
-                        byte[] payload = message.getPayload();
-                        boolean isBinary = isBinaryData(topic, payload);
-
-                        WritableMap eventData = Arguments.createMap();
-                        eventData.putString("topic", topic);
-                        // A retained message is a replay from the broker's store on subscribe, not
-                        // an answer to a request the app just sent. Consumers need to tell them apart.
-                        eventData.putBoolean("isRetained", message.isRetained());
-
-                        if (isBinary) {
-                            // Binary data: Base64 encode for transport over bridge
-                            String payloadBase64 = android.util.Base64.encodeToString(
-                                    payload,
-                                    android.util.Base64.NO_WRAP);
-                            eventData.putString("message", payloadBase64);
-                            eventData.putBoolean("isBinary", true);
-                            Log.d(TAG, "Received binary message on topic " + topic + " (" + payload.length + " bytes)");
-                        } else {
-                            // Text data: Send as UTF-8 string
-                            String messageStr = new String(payload, StandardCharsets.UTF_8);
-                            eventData.putString("message", messageStr);
-                            eventData.putBoolean("isBinary", false);
-                            Log.d(TAG, "Received text message on topic " + topic + " (" + payload.length + " bytes)");
-                        }
-
-                        reactContext
-                                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                .emit("MqttMessage", eventData);
-                    } catch (Exception e) {
-                        Log.e(TAG, "Failed to process MQTT message on topic " + topic, e);
-                    }
-                }
-
-                @Override
-                public void deliveryComplete(IMqttDeliveryToken token) {
-                    sendEvent("MqttDeliveryComplete", "Message delivered");
-                }
-            });
+            attemptClient.setCallback(createAttemptCallback(attemptClient));
 
             attemptClient.connect(options, null, new IMqttActionListener() {
                 @Override
