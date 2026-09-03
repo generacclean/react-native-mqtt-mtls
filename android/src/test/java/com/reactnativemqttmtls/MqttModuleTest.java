@@ -7,9 +7,12 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.MockitoAnnotations;
 
+import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Callback;
+import com.facebook.react.bridge.JavaOnlyMap;
 import com.facebook.react.bridge.ReactApplicationContext;
 
 import com.facebook.react.modules.core.DeviceEventManagerModule;
@@ -32,6 +35,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
@@ -625,6 +629,7 @@ public class MqttModuleTest {
 
     @Test
     public void testReleaseClientResources_DetachesCallbackFromReleasedClient() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
         setClient(mockClient);
 
@@ -632,14 +637,38 @@ public class MqttModuleTest {
         // and its service binding keep it alive — so the callback has to be detached explicitly.
         releaseClientResources(mockClient);
 
-        verify(mockClient).setCallback(null);
+        ArgumentCaptor<MqttCallbackExtended> detached =
+                ArgumentCaptor.forClass(MqttCallbackExtended.class);
+        verify(mockClient).setCallback(detached.capture());
+
+        // Null would throw: the Kotlin fork asserts non-null. What replaces it has to be inert.
+        assertNotNull(detached.getValue());
+        setClient(mockClient);
+        detached.getValue().connectComplete(false, "ssl://broker:8883");
+        detached.getValue().connectionLost(new RuntimeException("socket closed"));
+        detached.getValue().deliveryComplete(null);
+        verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testReleaseClientResources_ReleasesResourcesWhenCallbackDetachThrows() throws Exception {
+        MqttAndroidClient mockClient = mock(MqttAndroidClient.class);
+        doThrow(new IllegalStateException("client not bound"))
+                .when(mockClient).setCallback(any());
+        setClient(mockClient);
+
+        // The detach runs ahead of the receiver and binding release, so it must not strand them
+        releaseClientResources(mockClient);
+
+        verify(mockClient).unregisterResources();
+        assertNull(getClient());
     }
 
     @Test
     public void testAttemptCallback_ConnectCompleteFromSupersededClientEmitsNothing() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        MqttCallbackExtended callback = createAttemptCallback(supersededClient);
         setClient(mock(MqttAndroidClient.class));
 
         callback.connectComplete(false, "ssl://broker:8883");
@@ -652,7 +681,7 @@ public class MqttModuleTest {
     public void testAttemptCallback_ConnectionLostFromSupersededClientEmitsNothing() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        MqttCallbackExtended callback = createAttemptCallback(supersededClient);
         setClient(mock(MqttAndroidClient.class));
 
         callback.connectionLost(new RuntimeException("socket closed"));
@@ -665,22 +694,38 @@ public class MqttModuleTest {
     public void testAttemptCallback_MessageFromSupersededClientIsDropped() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        MqttCallbackExtended callback = createAttemptCallback(supersededClient);
         setClient(mock(MqttAndroidClient.class));
 
         callback.messageArrived("generac/proto/device", new MqttMessage(new byte[] {0x38, 0x01}));
 
-        // Ungated this injects a dead client's traffic into the live subscription stream. Only the
-        // stale path is asserted: the live path reaches Arguments.createMap(), which needs the RN
-        // JNI bridge and cannot run under Robolectric.
+        // Ungated this injects a dead client's traffic into the live subscription stream
         verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testAttemptCallback_MessageFromCurrentClientIsEmitted() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = createAttemptCallback(currentClient);
+        setClient(currentClient);
+
+        // Arguments.createMap() needs the RN JNI bridge, so the live path is only reachable with it
+        // stubbed to a pure-Java map.
+        try (MockedStatic<Arguments> arguments = mockStatic(Arguments.class)) {
+            arguments.when(Arguments::createMap).thenReturn(new JavaOnlyMap());
+
+            callback.messageArrived("generac/proto/device", new MqttMessage(new byte[] {0x38, 0x01}));
+        }
+
+        verify(emitter).emit(eq("MqttMessage"), any());
     }
 
     @Test
     public void testAttemptCallback_DeliveryCompleteFromSupersededClientEmitsNothing() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient supersededClient = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(supersededClient);
+        MqttCallbackExtended callback = createAttemptCallback(supersededClient);
         setClient(mock(MqttAndroidClient.class));
 
         callback.deliveryComplete(null);
@@ -692,7 +737,7 @@ public class MqttModuleTest {
     public void testAttemptCallback_CurrentClientStillEmits() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(currentClient);
+        MqttCallbackExtended callback = createAttemptCallback(currentClient);
         setClient(currentClient);
 
         // The gate must not silence the attempt that owns the connection
@@ -709,7 +754,7 @@ public class MqttModuleTest {
     public void testAttemptCallback_EmitsNothingOnceTheClientIsTornDown() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient client = mock(MqttAndroidClient.class);
-        MqttCallbackExtended callback = mqttModule.createAttemptCallback(client);
+        MqttCallbackExtended callback = createAttemptCallback(client);
         setClient(client);
 
         releaseClientResources(client);
@@ -717,6 +762,23 @@ public class MqttModuleTest {
 
         // Teardown clears the field, so a callback already in flight when it ran finds no owner
         verify(emitter, never()).emit(anyString(), any());
+    }
+
+    @Test
+    public void testCleanup_ForgetsTheClientBeforeReleasingItsResources() throws Exception {
+        MqttAndroidClient client = mock(MqttAndroidClient.class);
+        AtomicReference<Object> ownerDuringRelease = new AtomicReference<>();
+        doAnswer(invocation -> {
+            ownerDuringRelease.set(getClient());
+            return null;
+        }).when(client).unregisterResources();
+        setClient(client);
+
+        cleanupConnection(client);
+
+        // A callback queued on the main looper acquires clientLock as soon as the disconnect block
+        // releases it, so the field has to be clear by then — not later, when resources are released.
+        assertNull(ownerDuringRelease.get());
     }
 
     /**
@@ -753,6 +815,12 @@ public class MqttModuleTest {
         Method method = MqttModule.class.getDeclaredMethod("cleanupConnection", MqttAndroidClient.class);
         method.setAccessible(true);
         method.invoke(mqttModule, target);
+    }
+
+    private MqttCallbackExtended createAttemptCallback(MqttAndroidClient attemptClient) throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("createAttemptCallback", MqttAndroidClient.class);
+        method.setAccessible(true);
+        return (MqttCallbackExtended) method.invoke(mqttModule, attemptClient);
     }
 
     private void releaseClientResources(MqttAndroidClient disconnectedClient) throws Exception {

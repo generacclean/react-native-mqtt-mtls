@@ -328,6 +328,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     // handle is already gone. Either way there is no handle left to strand.
                     Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
                 }
+                // Forgotten under the same lock as the disconnect: a callback already queued on the
+                // main looper is blocked on this lock inside isCurrentClient, and would still read
+                // itself as current if the field were cleared later in releaseClientResources.
+                client = null;
             } else {
                 // A newer client holds this handle. Disconnecting would evict its entry and drop its
                 // session; it tears the handle down itself when its own teardown runs.
@@ -357,7 +361,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         try {
-            disconnectedClient.setCallback(null);
+            // Not null: the Kotlin fork's setCallback asserts non-null and throws on it. A callback
+            // bound to no client is inert — every method's isCurrentClient guard fails.
+            disconnectedClient.setCallback(createAttemptCallback(null));
         } catch (Exception e) {
             Log.w(TAG, "Callback detach error (non-critical): " + e.getMessage());
         }
@@ -389,10 +395,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Builds the event callback for one connect attempt, bound to the client that created it.
-     * Package-private so a test can reach it without the PKCS12 keystore connect() needs.
+     * Builds the event callback for one connect attempt, bound to the client that created it. A null
+     * client yields an inert callback, which is how {@link #releaseClientResources} detaches.
      */
-    MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
+    private MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
         return new MqttCallbackExtended() {
             @Override
             public void connectComplete(boolean reconnect, String serverURI) {
