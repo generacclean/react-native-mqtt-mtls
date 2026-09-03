@@ -75,7 +75,31 @@ class MqttModule: RCTEventEmitter {
         return String(data: data, encoding: .utf8) == nil
     }
 
-    private var mqttClient: CocoaMQTT?
+    /// Guards `mqttClient`: RN dispatches module methods off its own queue, CocoaMQTT's
+    /// `delegateQueue` defaults to main. Recursive so a nested read cannot self-deadlock.
+    private let clientLock = NSRecursiveLock()
+    private var _mqttClient: CocoaMQTT?
+    private var mqttClient: CocoaMQTT? {
+        get {
+            clientLock.lock()
+            defer { clientLock.unlock() }
+            return _mqttClient
+        }
+        set {
+            clientLock.lock()
+            defer { clientLock.unlock() }
+            _mqttClient = newValue
+        }
+    }
+
+    /// Whether this callback belongs to the client the module currently owns. Defence-in-depth:
+    /// `CocoaMQTT.deinit` should stop a superseded client emitting, but that is unconfirmed on device.
+    private func isCurrentClient(_ mqtt: CocoaMQTT) -> Bool {
+        clientLock.lock()
+        defer { clientLock.unlock() }
+        return _mqttClient === mqtt
+    }
+
     private var expectedBrokerCN: String?
     private var trustedRootCerts: [SecCertificate] = []
     private var connectSuccessCallback: RCTResponseSenderBlock?
@@ -141,17 +165,22 @@ class MqttModule: RCTEventEmitter {
         return false
     }
     
-    // Centralized cleanup method
+    /// Deliberately does not nil the outgoing client's `delegate`: `deinit` does that and closes the
+    /// socket, and nilling it mid-handshake leaks the socket by never calling the trust handler.
     private func cleanupConnection() {
         os_log("Cleaning up connection state...", log: logger, type: .info)
-        
-        if let client = mqttClient {
+
+        // Forgotten before the disconnect, not after: `mqttDidDisconnect` arrives on the delegate
+        // queue, and if the field still held this client the guard there would let it emit.
+        let outgoing = mqttClient
+        mqttClient = nil
+
+        if let client = outgoing {
             client.autoReconnect = false
             client.disconnect()
             os_log("  - Disconnected existing client", log: logger, type: .info)
         }
-        
-        mqttClient = nil
+
         connectSuccessCallback = nil
         connectErrorCallback = nil
         expectedBrokerCN = nil
@@ -374,11 +403,13 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
+            // Installed before the callbacks: while the field still held a previous client, a
+            // delegate call from it would pass the identity guard and settle this attempt's promise.
+            self.mqttClient = client
             self.connectSuccessCallback = { args in successGuard.invoke(args ?? []) }
             self.connectErrorCallback = { args in errorGuard.invoke(args ?? []) }
             self.brokerUrl = broker
             self.clientIdentifier = clientId
-            self.mqttClient = client
             os_log("✓ State stored", log: logger, type: .info)
             os_log("", log: logger, type: .info)
             
@@ -433,8 +464,6 @@ class MqttModule: RCTEventEmitter {
         
         os_log("Calling disconnect()...", log: logger, type: .info)
         let successGuard = CallbackGuard(successCallback)
-
-        client.disconnect()
 
         cleanupConnection()
 
@@ -783,6 +812,14 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didReceive trust: SecTrust, completionHandler: @escaping (Bool) -> Void) {
+        // Deny rather than bare-return: `didReceiveTrust`'s default no-op closure would hang the
+        // handshake instead of failing it.
+        guard isCurrentClient(mqtt) else {
+            os_log("Denying trust for a superseded client", log: logger, type: .error)
+            completionHandler(false)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -814,6 +851,11 @@ extension MqttModule: CocoaMQTTDelegate {
     }
 
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring didConnectAck from a superseded client", log: logger, type: .default)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -853,6 +895,11 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didPublishMessage message: CocoaMQTTMessage, id: UInt16) {
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring didPublishMessage from a superseded client", log: logger, type: .default)
+            return
+        }
+
         os_log("DELEGATE: didPublishMessage (id=%d, topic=%{public}@)", log: logger, type: .info, id, message.topic)
         self.sendEvent(withName: "MqttDeliveryComplete", body: [
             "topic": message.topic,
@@ -865,6 +912,12 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
+        guard isCurrentClient(mqtt) else {
+            os_log("Dropping message from a superseded client on topic %{public}@",
+                   log: logger, type: .default, message.topic)
+            return
+        }
+
         os_log("DELEGATE: didReceiveMessage (id=%d, topic=%{public}@, size=%d bytes)", log: logger, type: .info, id, message.topic, message.payload.count)
 
         let payloadData = Data(message.payload)
@@ -917,6 +970,11 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqttDidDisconnect(_ mqtt: CocoaMQTT, withError err: Error?) {
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring mqttDidDisconnect from a superseded client", log: logger, type: .default)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
