@@ -75,7 +75,33 @@ class MqttModule: RCTEventEmitter {
         return String(data: data, encoding: .utf8) == nil
     }
 
-    private var mqttClient: CocoaMQTT?
+    /// Guards `mqttClient`: RN dispatches module methods off its own queue while CocoaMQTT's
+    /// `delegateQueue` defaults to main, so the guards below would compare against a reference
+    /// written elsewhere. Recursive because a call under it can re-enter a delegate method.
+    private let clientLock = NSRecursiveLock()
+    private var _mqttClient: CocoaMQTT?
+    private var mqttClient: CocoaMQTT? {
+        get {
+            clientLock.lock()
+            defer { clientLock.unlock() }
+            return _mqttClient
+        }
+        set {
+            clientLock.lock()
+            defer { clientLock.unlock() }
+            _mqttClient = newValue
+        }
+    }
+
+    /// Whether this callback belongs to the client the module currently owns. Defence-in-depth:
+    /// `CocoaMQTT.deinit` should stop a superseded client emitting, but that is unconfirmed on
+    /// device, and a stale event is indistinguishable from a live one by the time it reaches JS.
+    private func isCurrentClient(_ mqtt: CocoaMQTT) -> Bool {
+        clientLock.lock()
+        defer { clientLock.unlock() }
+        return _mqttClient === mqtt
+    }
+
     private var expectedBrokerCN: String?
     private var trustedRootCerts: [SecCertificate] = []
     private var connectSuccessCallback: RCTResponseSenderBlock?
@@ -141,10 +167,12 @@ class MqttModule: RCTEventEmitter {
         return false
     }
     
-    // Centralized cleanup method
+    /// Deliberately does not nil the outgoing client's `delegate`: `CocoaMQTT.deinit` does that and
+    /// closes the socket too, and nilling it mid-handshake leaves `didReceiveTrust`'s default no-op
+    /// closure to never call the completion handler, leaking the socket in handshake.
     private func cleanupConnection() {
         os_log("Cleaning up connection state...", log: logger, type: .info)
-        
+
         if let client = mqttClient {
             client.autoReconnect = false
             client.disconnect()
@@ -434,8 +462,7 @@ class MqttModule: RCTEventEmitter {
         os_log("Calling disconnect()...", log: logger, type: .info)
         let successGuard = CallbackGuard(successCallback)
 
-        client.disconnect()
-
+        // cleanupConnection() issues the disconnect; a second one here is redundant
         cleanupConnection()
 
         os_log("✓ Disconnected and cleaned up", log: logger, type: .info)
@@ -783,6 +810,14 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didReceive trust: SecTrust, completionHandler: @escaping (Bool) -> Void) {
+        // Denied, never a bare return: `didReceiveTrust`'s default is a no-op closure, so returning
+        // without calling the handler leaves the handshake hanging instead of failing it.
+        guard isCurrentClient(mqtt) else {
+            os_log("Denying trust for a superseded client", log: logger, type: .error)
+            completionHandler(false)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -814,6 +849,14 @@ extension MqttModule: CocoaMQTTDelegate {
     }
 
     func mqtt(_ mqtt: CocoaMQTT, didConnectAck ack: CocoaMQTTConnAck) {
+        // The worst of the four ungated: on .accept this emits MqttConnected *and* fires
+        // connectSuccessCallback, which by then is the live attempt's guard — reporting success for
+        // a connection that does not exist.
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring didConnectAck from a superseded client", log: logger, type: .default)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -853,6 +896,11 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didPublishMessage message: CocoaMQTTMessage, id: UInt16) {
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring didPublishMessage from a superseded client", log: logger, type: .default)
+            return
+        }
+
         os_log("DELEGATE: didPublishMessage (id=%d, topic=%{public}@)", log: logger, type: .info, id, message.topic)
         self.sendEvent(withName: "MqttDeliveryComplete", body: [
             "topic": message.topic,
@@ -865,6 +913,13 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
+        // A superseded client's traffic must not enter the live subscription stream
+        guard isCurrentClient(mqtt) else {
+            os_log("Dropping message from a superseded client on topic %{public}@",
+                   log: logger, type: .default, message.topic)
+            return
+        }
+
         os_log("DELEGATE: didReceiveMessage (id=%d, topic=%{public}@, size=%d bytes)", log: logger, type: .info, id, message.topic, message.payload.count)
 
         let payloadData = Data(message.payload)
@@ -917,6 +972,13 @@ extension MqttModule: CocoaMQTTDelegate {
     }
     
     func mqttDidDisconnect(_ mqtt: CocoaMQTT, withError err: Error?) {
+        // Ungated, a superseded client's disconnect makes the app tear down a connection that is
+        // alive, and can settle the live attempt's error callback
+        guard isCurrentClient(mqtt) else {
+            os_log("Ignoring mqttDidDisconnect from a superseded client", log: logger, type: .default)
+            return
+        }
+
         var elapsed = ""
         if let startTime = connectionStartTime {
             let duration = Date().timeIntervalSince(startTime)
