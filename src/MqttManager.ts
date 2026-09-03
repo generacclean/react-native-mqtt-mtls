@@ -68,6 +68,9 @@ export class MqttManager {
     }
   }
 
+  // Registered once, dispatching through `this.config`, which every connect() overwrites — an event
+  // reaches whichever attempt is live, not the one that caused it. Native events carry no attempt
+  // identity, so this layer is safe only while the native client-identity guards hold.
   private setupEventEmitter(): void {
     this.eventEmitter = new NativeEventEmitter(MqttModule as any);
 
