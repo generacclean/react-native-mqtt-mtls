@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Events from a superseded connection attempt were attributed to the current one**
+  ([GREM-64](https://generacet.atlassian.net/browse/GREM-64))
+  - A reconnect supersedes the previous client, but the old one keeps emitting: on Android the Paho
+    client stays alive through its registered `BroadcastReceiver` and service binding regardless of
+    our reference, and on iOS a superseded `CocoaMQTT` can still deliver a queued delegate call. The
+    JS layer registers one listener per event and dispatches through a `config` that every
+    `connect()` overwrites, so a late `connectionLost` or message landed on the new attempt's
+    handlers — surfacing as a spurious disconnect, or a message routed to the wrong subscriber.
+  - Every native event callback now carries the client that created it and emits only while that
+    client is still the one the module owns. Android holds the check under the same `clientLock` as
+    the teardown that clears the field, so a callback already queued on the main looper cannot pass
+    the guard after its client has been retired; iOS uses an `NSRecursiveLock` around the same
+    comparison.
+  - The identity check is the enforcing control. Detaching the callback on teardown is a secondary
+    measure and cannot stand alone — `MqttAndroidClient.setCallback` rejects null on this Kotlin
+    fork, so the detach installs an inert callback rather than removing one, and it does nothing for
+    a callback already in flight.
+  - Not addressed here: the JS layer still has no attempt identity of its own, so correct routing
+    rests on the native guards. iOS carries no executable coverage for the guards (no Xcode target
+    compiles `MqttModule.swift`); Android does.
+
 ## [1.5.2] - 2026-08-27
 
 ### Fixed

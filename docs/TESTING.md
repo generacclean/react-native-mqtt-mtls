@@ -132,7 +132,36 @@ The library uses UTF-8 validity as a heuristic to detect binary data. Protobuf m
 **Why This Matters:**
 PR #4 changed `MqttMessage.message` type from `ArrayBuffer` to `Uint8Array`. These tests ensure consumers get correct TypeScript autocomplete and type checking.
 
-### 4. Integration Tests
+### 4. Client Identity Guard Tests
+
+**Purpose:** Verify a superseded connection attempt's events never reach JS.
+
+**Android Tests:**
+- `testAttemptCallback_ConnectCompleteFromSupersededClientEmitsNothing`
+- `testAttemptCallback_ConnectionLostFromSupersededClientEmitsNothing`
+- `testAttemptCallback_MessageFromSupersededClientIsDropped`
+- `testAttemptCallback_DeliveryCompleteFromSupersededClientEmitsNothing`
+- `testAttemptCallback_MessageFromCurrentClientIsEmitted` - Positive control: the guard is not
+  suppressing everything
+- `testAttemptCallback_CurrentClientStillEmits` - Positive control for the other three events
+- `testAttemptCallback_EmitsNothingOnceTheClientIsTornDown`
+- `testCleanup_ForgetsTheClientBeforeReleasingItsResources` - Pins the ordering: the field is
+  cleared inside the same `clientLock` block as the disconnect
+- `testReleaseClientResources_DetachesCallbackFromReleasedClient` - Asserts the installed callback
+  is non-null and inert, because `setCallback(null)` throws on this Paho fork
+- `testReleaseClientResources_ReleasesResourcesWhenCallbackDetachThrows`
+
+**iOS Tests:**
+- None. `MqttModule.swift` needs React and CocoaMQTT, and no target in this repo compiles it, so the
+  guards there are covered only by the on-device supersede scenario.
+
+**Why This Matters:**
+A superseded client keeps emitting — on Android the Paho client is held alive by its registered
+`BroadcastReceiver` and service binding, independent of our reference. The JS layer registers one
+listener per event and dispatches through a config that every `connect()` overwrites, so a late
+`connectionLost` reads as a spurious disconnect and a late message goes to the wrong subscriber.
+
+### 5. Integration Tests
 
 **Purpose:** Test end-to-end message flows.
 

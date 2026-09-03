@@ -575,6 +575,12 @@ private boolean isBinaryData(String topic, byte[] payload) {
 
 @Override
 public void messageArrived(String topic, MqttMessage message) {
+    // attemptClient is captured when this callback is built, so a superseded client's
+    // late message is dropped instead of routed to the current attempt's subscriber.
+    if (!isCurrentClient(attemptClient)) {
+        return;
+    }
+
     byte[] payload = message.getPayload();
     boolean isBinary = isBinaryData(topic, payload);
     
@@ -630,6 +636,9 @@ private func isBinaryData(topic: String, data: Data) -> Bool {
 }
 
 func mqtt(_ mqtt: CocoaMQTT, didReceiveMessage message: CocoaMQTTMessage, id: UInt16) {
+    // The delegate is shared, so the sender has to be the client the module still owns.
+    guard isCurrentClient(mqtt) else { return }
+
     let payloadData = Data(message.payload)
     let isBinary = self.isBinaryData(topic: message.topic, data: payloadData)
     

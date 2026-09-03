@@ -229,6 +229,10 @@ interface MqttConfig {
 }
 ```
 
+Calling `connect()` again supersedes the previous attempt. The handlers above are only invoked for
+events from the connection the library currently owns — a superseded client's late `onMessage` or
+`onConnectionLost` is withheld rather than delivered to the new attempt's handlers.
+
 ### `disconnect()`
 
 Disconnects from the MQTT broker.
