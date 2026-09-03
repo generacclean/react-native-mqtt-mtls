@@ -76,7 +76,7 @@ class MqttModule: RCTEventEmitter {
     }
 
     /// Guards `mqttClient`: RN dispatches module methods off its own queue, CocoaMQTT's
-    /// `delegateQueue` defaults to main. Recursive because a call under it can re-enter a delegate.
+    /// `delegateQueue` defaults to main. Recursive so a nested read cannot self-deadlock.
     private let clientLock = NSRecursiveLock()
     private var _mqttClient: CocoaMQTT?
     private var mqttClient: CocoaMQTT? {
@@ -170,13 +170,17 @@ class MqttModule: RCTEventEmitter {
     private func cleanupConnection() {
         os_log("Cleaning up connection state...", log: logger, type: .info)
 
-        if let client = mqttClient {
+        // Forgotten before the disconnect, not after: `mqttDidDisconnect` arrives on the delegate
+        // queue, and if the field still held this client the guard there would let it emit.
+        let outgoing = mqttClient
+        mqttClient = nil
+
+        if let client = outgoing {
             client.autoReconnect = false
             client.disconnect()
             os_log("  - Disconnected existing client", log: logger, type: .info)
         }
-        
-        mqttClient = nil
+
         connectSuccessCallback = nil
         connectErrorCallback = nil
         expectedBrokerCN = nil
@@ -399,11 +403,13 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
+            // Installed before the callbacks: while the field still held a previous client, a
+            // delegate call from it would pass the identity guard and settle this attempt's promise.
+            self.mqttClient = client
             self.connectSuccessCallback = { args in successGuard.invoke(args ?? []) }
             self.connectErrorCallback = { args in errorGuard.invoke(args ?? []) }
             self.brokerUrl = broker
             self.clientIdentifier = clientId
-            self.mqttClient = client
             os_log("✓ State stored", log: logger, type: .info)
             os_log("", log: logger, type: .info)
             
