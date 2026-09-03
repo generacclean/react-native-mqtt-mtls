@@ -348,9 +348,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * the current one: a disconnect callback can arrive after a new connection has replaced it, and
      * that new client must not be torn down by the old client's callback.
      *
-     * The callback is detached first because dropping our reference does not stop this client
-     * dispatching — its registered BroadcastReceiver and service binding keep it alive. That covers
-     * the clean path; {@link #createAttemptCallback}'s guard covers a callback already in flight.
+     * Detaching the callback covers the clean path; {@link #createAttemptCallback}'s guard covers a
+     * callback already in flight.
      */
     private void releaseClientResources(MqttAndroidClient disconnectedClient) {
         if (disconnectedClient == null) {
@@ -377,9 +376,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Whether the given client is still the one this module owns. A stale emission is
-     * indistinguishable from a live one by the time it reaches JS, so it has to be caught here;
-     * under clientLock so no guard observes the field mid-teardown.
+     * Whether the given client is still the one this module owns. Under clientLock so no guard
+     * observes the field mid-teardown.
      */
     private boolean isCurrentClient(MqttAndroidClient candidate) {
         if (candidate == null) {
@@ -391,9 +389,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Builds the event callback for one connect attempt, bound to the client that created it, every
-     * method gated on {@link #isCurrentClient}. Package-private rather than inline in connect() so a
-     * test can reach it without the real PKCS12 keystore createSSLContextFromKeystore() needs.
+     * Builds the event callback for one connect attempt, bound to the client that created it.
+     * Package-private so a test can reach it without the PKCS12 keystore connect() needs.
      */
     MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
         return new MqttCallbackExtended() {
