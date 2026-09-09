@@ -23,6 +23,13 @@ All notable changes to this project will be documented in this file.
     measure and cannot stand alone — `MqttAndroidClient.setCallback` rejects null on this Kotlin
     fork, so the detach installs an inert callback rather than removing one, and it does nothing for
     a callback already in flight.
+  - **Behaviour change for consumers on iOS:** `disconnect()` and `cleanup()` no longer emit
+    `MqttDisconnected`. Both retire the client before closing its socket, so the delegate call that
+    follows no longer passes the identity guard. Android's `disconnect()` emits nothing on either
+    path, so this removes a divergence rather than creating one. A consumer that mirrored that event
+    into its own state must set its disconnected flag on the `disconnect()` call itself.
+    `MqttManager.disconnect()` clears `_isConnected` in its success callback — iOS always reaches
+    that, but a rejected disconnect leaves the flag set, so handle the rejection too.
   - Not addressed here: the JS layer still has no attempt identity of its own, so correct routing
     rests on the native guards. iOS carries no executable coverage for the guards (no Xcode target
     compiles `MqttModule.swift`); Android does.

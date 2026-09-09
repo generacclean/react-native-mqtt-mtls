@@ -306,9 +306,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
      * MqttAndroidClient's receiver runs later on the main-thread looper instead of inline;
      * MqttConnection.disconnect() never waits on the token and clears its message store on
      * Dispatchers.IO; and ClientComms.disconnect() hands the wire disconnect to a background
-     * DisconnectBG. The lock's only other critical sections are one field write each. That reasoning
-     * is pinned to the paho.mqtt.android 3.6.4 and mqttv3 1.2.5 in build.gradle — a bump wants it
-     * rechecked.
+     * DisconnectBG. The other critical sections are two field writes and isCurrentClient's read,
+     * which all four MqttCallbackExtended methods take from the main looper — so the lock is on the
+     * delivery path, and a callback can stall there for this disconnect's binder round-trip. Pinned
+     * to paho.mqtt.android 3.6.4 and mqttv3 1.2.5 in build.gradle — a bump wants it rechecked,
+     * delivery included.
      */
     private void cleanupConnection(MqttAndroidClient staleClient) {
         Log.d(TAG, "Cleaning up MQTT connection state...");
@@ -328,9 +330,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     // handle is already gone. Either way there is no handle left to strand.
                     Log.w(TAG, "  - Disconnect error (non-critical): " + e.getMessage());
                 }
-                // Forgotten under the same lock as the disconnect: a callback already queued on the
-                // main looper is blocked on this lock inside isCurrentClient, and would still read
-                // itself as current if the field were cleared later in releaseClientResources.
+                // Cleared under the disconnect's lock: a callback inside isCurrentClient blocks here,
+                // one still queued reads null. Clearing in releaseClientResources would miss both.
                 client = null;
             } else {
                 // A newer client holds this handle. Disconnecting would evict its entry and drop its

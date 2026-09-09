@@ -403,8 +403,8 @@ class MqttModule: RCTEventEmitter {
             }
             
             os_log("STEP 5: Storing callbacks and state...", log: logger, type: .info)
-            // Installed before the callbacks: while the field still held a previous client, a
-            // delegate call from it would pass the identity guard and settle this attempt's promise.
+            // Installed before the callbacks: no callback is settleable until the field names the
+            // client that will settle it. Holds locally — the field is nil on entry.
             self.mqttClient = client
             self.connectSuccessCallback = { args in successGuard.invoke(args ?? []) }
             self.connectErrorCallback = { args in errorGuard.invoke(args ?? []) }

@@ -146,7 +146,7 @@ PR #4 changed `MqttMessage.message` type from `ArrayBuffer` to `Uint8Array`. The
 - `testAttemptCallback_CurrentClientStillEmits` - Positive control for the other three events
 - `testAttemptCallback_EmitsNothingOnceTheClientIsTornDown`
 - `testCleanup_ForgetsTheClientBeforeReleasingItsResources` - Pins the ordering: the field is
-  cleared inside the same `clientLock` block as the disconnect
+  cleared before the client's resources are released
 - `testReleaseClientResources_DetachesCallbackFromReleasedClient` - Asserts the installed callback
   is non-null and inert, because `setCallback(null)` throws on this Paho fork
 - `testReleaseClientResources_ReleasesResourcesWhenCallbackDetachThrows`

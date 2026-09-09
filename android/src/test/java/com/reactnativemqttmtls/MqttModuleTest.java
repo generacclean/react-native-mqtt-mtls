@@ -697,7 +697,13 @@ public class MqttModuleTest {
         MqttCallbackExtended callback = createAttemptCallback(supersededClient);
         setClient(mock(MqttAndroidClient.class));
 
-        callback.messageArrived("generac/proto/device", new MqttMessage(new byte[] {0x38, 0x01}));
+        // Stubbed as in the positive test below: ungated, the call reaches Arguments.createMap(), and
+        // the UnsatisfiedLinkError it raises would escape catch (Exception) before the verify.
+        try (MockedStatic<Arguments> arguments = mockStatic(Arguments.class)) {
+            arguments.when(Arguments::createMap).thenReturn(new JavaOnlyMap());
+
+            callback.messageArrived("generac/proto/device", new MqttMessage(new byte[] {0x38, 0x01}));
+        }
 
         // Ungated this injects a dead client's traffic into the live subscription stream
         verify(emitter, never()).emit(anyString(), any());
