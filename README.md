@@ -229,6 +229,11 @@ interface MqttConfig {
 }
 ```
 
+Calling `connect()` again supersedes the previous attempt. A client the library has already retired
+cannot emit: its late `onMessage` or `onConnectionLost` is dropped natively rather than dispatched.
+The JS layer has no per-attempt routing of its own, so an event already in flight when you call
+`connect()` can still reach the new attempt's handlers.
+
 ### `disconnect()`
 
 Disconnects from the MQTT broker.

@@ -68,6 +68,8 @@ export class MqttManager {
     }
   }
 
+  // One listener per event dispatches through `this.config`, which every connect() overwrites, and
+  // native events carry no attempt identity — the native guards narrow misattribution, not rule it out.
   private setupEventEmitter(): void {
     this.eventEmitter = new NativeEventEmitter(MqttModule as any);
 

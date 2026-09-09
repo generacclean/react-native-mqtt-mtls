@@ -10,6 +10,11 @@
  * test:ios` exits non-zero to say so. Treat them as a spec awaiting a target, not as coverage.
  * Server-trust validation deliberately does not live here — it sits in TrustValidationTests, which
  * `swift test` runs on every push, because that logic is the security-critical part.
+ *
+ * The delegate identity guards are also absent, deliberately. Setting one up means seeding the
+ * module's client storage, which is private, so speccing them would widen that visibility to feed
+ * assertions that no CI job compiles, let alone runs. Their only check is the on-device supersede
+ * scenario. Android carries the executable coverage for the same defect.
  */
 
 import XCTest
