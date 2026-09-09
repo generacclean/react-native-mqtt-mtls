@@ -425,6 +425,8 @@ class MqttModule: RCTEventEmitter {
                 os_log("  - Waiting for delegate callbacks...", log: logger, type: .info)
             } else {
                 os_log("✗ Connection initiation FAILED", log: logger, type: .error)
+                // Retired now, or a late delegate call from a client that never connected passes the guard.
+                mqttClient = nil
                 errorGuard.invoke(["Failed to start connection - client.connect() returned false"])
             }
             
