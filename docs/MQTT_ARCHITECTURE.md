@@ -573,9 +573,11 @@ private boolean isBinaryData(String topic, byte[] payload) {
     }
 }
 
-// The four callback methods below are members of the anonymous MqttCallbackExtended returned by
-// createAttemptCallback(final MqttAndroidClient attemptClient) — that signature is where the
-// attemptClient capture comes from. isBinaryData above is an ordinary top-level method.
+// messageArrived below is one of four callback methods — connectComplete, connectionLost,
+// messageArrived, deliveryComplete — on the anonymous MqttCallbackExtended returned by
+// createAttemptCallback(final MqttAndroidClient attemptClient); that signature is where the
+// attemptClient capture comes from. Only messageArrived is excerpted here. isBinaryData above is
+// an ordinary top-level method.
 @Override
 public void messageArrived(String topic, MqttMessage message) {
     // attemptClient is captured when this callback is built, so a superseded client's

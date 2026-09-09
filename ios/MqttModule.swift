@@ -426,6 +426,8 @@ class MqttModule: RCTEventEmitter {
             } else {
                 os_log("✗ Connection initiation FAILED", log: logger, type: .error)
                 // Retired now, or a late delegate call from a client that never connected passes the guard.
+                // The next connect() therefore skips cleanupConnection(); the leftover TLS state has no
+                // reader until a delegate exists, and the TLS path refreshes that state before installing one.
                 mqttClient = nil
                 errorGuard.invoke(["Failed to start connection - client.connect() returned false"])
             }
