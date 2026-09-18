@@ -102,6 +102,29 @@ class MqttModule: RCTEventEmitter {
 
     private var expectedBrokerCN: String?
     private var trustedRootCerts: [SecCertificate] = []
+
+    /// Guards `_lastTrustFailure`: the trust delegate and the disconnect delegate are not guaranteed
+    /// to share a queue with the RN-dispatched `connect` that clears it.
+    private let trustFailureLock = NSLock()
+    private var _lastTrustFailure: String?
+
+    /// Why this attempt's broker certificate was rejected, or nil if it was not.
+    ///
+    /// CocoaMQTT's trust delegate returns a bare `Bool`, so the reason cannot travel with the
+    /// rejection: the handshake just fails and `mqttDidDisconnect` reports a generic transport error.
+    /// Holding it here is what lets the connect error callback name the actual cause.
+    private var lastTrustFailure: String? {
+        get {
+            trustFailureLock.lock()
+            defer { trustFailureLock.unlock() }
+            return _lastTrustFailure
+        }
+        set {
+            trustFailureLock.lock()
+            defer { trustFailureLock.unlock() }
+            _lastTrustFailure = newValue
+        }
+    }
     private var connectSuccessCallback: RCTResponseSenderBlock?
     private var connectErrorCallback: RCTResponseSenderBlock?
     private var brokerUrl: String = ""
@@ -185,6 +208,7 @@ class MqttModule: RCTEventEmitter {
         connectErrorCallback = nil
         expectedBrokerCN = nil
         trustedRootCerts = []
+        lastTrustFailure = nil
         brokerUrl = ""
         clientIdentifier = ""
         connectionStartTime = nil
@@ -264,7 +288,10 @@ class MqttModule: RCTEventEmitter {
         }
         
         connectionStartTime = Date()
-        
+        // Per attempt, not per client: a failed attempt can leave the client field nil, so the
+        // cleanup above does not run and a previous rejection would be reported against this one.
+        lastTrustFailure = nil
+
         os_log("", log: logger, type: .info)
         os_log("═══════════════════════════════════════════════════════", log: logger, type: .info)
         os_log("MQTT CONNECTION ATTEMPT STARTED", log: logger, type: .info)
@@ -440,11 +467,10 @@ class MqttModule: RCTEventEmitter {
             os_log("═══════════════════════════════════════════════════════", log: logger, type: .error)
             os_log("FATAL ERROR DURING CONNECTION SETUP", log: logger, type: .error)
             os_log("═══════════════════════════════════════════════════════", log: logger, type: .error)
-            os_log("Error: %{public}@", log: logger, type: .error, error.localizedDescription)
-            os_log("Error domain: %{public}@", log: logger, type: .error, (error as NSError).domain)
-            os_log("Error code: %d", log: logger, type: .error, (error as NSError).code)
+            let description = ErrorDescription.describe(error)
+            os_log("Error: %{public}@", log: logger, type: .error, description)
             os_log("", log: logger, type: .error)
-            errorGuard.invoke([error.localizedDescription])
+            errorGuard.invoke(["Connection setup failed: \(description)"])
         }
     }
     
@@ -838,7 +864,15 @@ extension MqttModule: CocoaMQTTDelegate {
         os_log("╚═══════════════════════════════════════════════════════╝", log: logger, type: .info)
         os_log("", log: logger, type: .info)
 
-        let trusted = evaluateServerTrust(trust, expectedCN: expectedBrokerCN, anchors: trustedRootCerts)
+        let result = evaluateServerTrust(trust, expectedCN: expectedBrokerCN, anchors: trustedRootCerts)
+        let trusted = result.isTrusted
+
+        // Held for the connect error callback: returning false here only tells CocoaMQTT to fail the
+        // handshake, and the disconnect that follows carries a transport error that says nothing
+        // about the certificate. Assigned on success too — an auto-reconnect re-runs this delegate
+        // without going through connect(), so a handshake that now passes has to clear the verdict
+        // rather than leave the old reason for a later, unrelated disconnect to report.
+        lastTrustFailure = result.rejectionReason
 
         os_log("", log: logger, type: .info)
         os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: trusted ? .info : .error)
@@ -850,7 +884,9 @@ extension MqttModule: CocoaMQTTDelegate {
 
     /// Validates a server's TLS trust object. The logic lives in `TrustValidator` so it can be
     /// unit-tested without React Native or CocoaMQTT; see `ios/TrustValidation/TrustValidator.swift`.
-    internal func evaluateServerTrust(_ trust: SecTrust, expectedCN: String?, anchors: [SecCertificate]) -> Bool {
+    internal func evaluateServerTrust(_ trust: SecTrust,
+                                      expectedCN: String?,
+                                      anchors: [SecCertificate]) -> TrustValidationResult {
         return TrustValidator.evaluate(trust: trust, expectedCN: expectedCN, anchors: anchors, log: logger)
     }
 
@@ -985,8 +1021,8 @@ extension MqttModule: CocoaMQTTDelegate {
             elapsed = String(format: " [+%.3fs]", duration)
         }
         
-        let errorMsg = err?.localizedDescription ?? "Clean disconnect"
-        
+        let errorMsg = err == nil ? "Clean disconnect" : ErrorDescription.describe(err)
+
         os_log("", log: logger, type: .info)
         os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
         os_log("║ DELEGATE: mqttDidDisconnect                           ║", log: logger, type: .info)
@@ -1005,7 +1041,15 @@ extension MqttModule: CocoaMQTTDelegate {
         
         if let errorCallback = connectErrorCallback {
             os_log("Connection never established, calling error callback", log: logger, type: .error)
-            errorCallback(["Connection failed: \(errorMsg)"])
+            // The "Connection failed: " prefix is load-bearing: the app classifies this string, and a
+            // socket timeout has to keep reading as one.
+            var reported = "Connection failed: \(errorMsg)"
+            if let trustFailure = lastTrustFailure {
+                // What the transport error cannot say. Our own trust validator refused the broker,
+                // so the handshake failure below it is a consequence, not the cause.
+                reported += " | broker certificate rejected: \(trustFailure)"
+            }
+            errorCallback([reported])
             connectErrorCallback = nil
             connectSuccessCallback = nil
         }
