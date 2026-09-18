@@ -1021,7 +1021,19 @@ extension MqttModule: CocoaMQTTDelegate {
             elapsed = String(format: " [+%.3fs]", duration)
         }
         
-        let errorMsg = err == nil ? "Clean disconnect" : ErrorDescription.describe(err)
+        var errorMsg = err == nil ? "Clean disconnect" : ErrorDescription.describe(err)
+
+        // What the transport error cannot say. Our own trust validator refused the broker, so the
+        // handshake failure below it is a consequence, not the cause. Appended here rather than only
+        // on the connect-error callback below: a certificate that expires or rotates after a working
+        // connection is rejected during CocoaMQTT's auto-reconnect, which arrives as a disconnect with
+        // no pending connect callback, so the reason would otherwise be dropped on the failure mode
+        // most likely to happen in the field. Skipped on a clean disconnect, where nothing failed, and
+        // when the description already carries the reason, matching Android's guard — CocoaMQTT cannot
+        // surface it today, but that is its choice to change, not a guarantee to build on.
+        if err != nil, let trustFailure = lastTrustFailure, !errorMsg.contains(trustFailure) {
+            errorMsg += " | broker certificate rejected: \(trustFailure)"
+        }
 
         os_log("", log: logger, type: .info)
         os_log("╔═══════════════════════════════════════════════════════╗", log: logger, type: .info)
@@ -1042,15 +1054,8 @@ extension MqttModule: CocoaMQTTDelegate {
         if let errorCallback = connectErrorCallback {
             os_log("Connection never established, calling error callback", log: logger, type: .error)
             // The "Connection failed: " prefix is load-bearing: the app classifies this string, and a
-            // socket timeout has to keep reading as one.
-            var reported = "Connection failed: \(errorMsg)"
-            // What the transport error cannot say. Our own trust validator refused the broker, so
-            // the handshake failure below it is a consequence, not the cause. Skipped when the
-            // chain already carries the reason, matching Android's guard — CocoaMQTT cannot
-            // surface it today, but that is its choice to change, not a guarantee to build on.
-            if let trustFailure = lastTrustFailure, !reported.contains(trustFailure) {
-                reported += " | broker certificate rejected: \(trustFailure)"
-            }
+            // socket timeout has to keep reading as one. The trust reason is already in errorMsg.
+            let reported = "Connection failed: \(errorMsg)"
             errorCallback([reported])
             connectErrorCallback = nil
             connectSuccessCallback = nil

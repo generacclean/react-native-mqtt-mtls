@@ -364,7 +364,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         try {
             // Not null: the Kotlin fork's setCallback asserts non-null and throws on it. A callback
             // bound to no client is inert — every method's isCurrentClient guard fails.
-            disconnectedClient.setCallback(createAttemptCallback(null));
+            disconnectedClient.setCallback(createAttemptCallback(null, null));
         } catch (Exception e) {
             Log.w(TAG, "Callback detach error (non-critical): " + e.getMessage());
         }
@@ -398,8 +398,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
     /**
      * Builds the event callback for one connect attempt, bound to the client that created it. A null
      * client yields an inert callback, which is how {@link #releaseClientResources} detaches.
+     *
+     * @param attemptTrustFailure this attempt's trust verdict, read when the connection drops. Null
+     *                            for the inert callback, which reports nothing.
      */
-    private MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
+    private MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient,
+            final TrustFailureHolder attemptTrustFailure) {
         return new MqttCallbackExtended() {
             @Override
             public void connectComplete(boolean reconnect, String serverURI) {
@@ -413,11 +417,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             @Override
             public void connectionLost(Throwable cause) {
-                String errorMsg = describeThrowable(cause);
                 if (!isCurrentClient(attemptClient)) {
-                    Log.d(TAG, "Ignoring connectionLost from a superseded client: " + errorMsg);
+                    Log.d(TAG, "Ignoring connectionLost from a superseded client: " + describeThrowable(cause));
                     return;
                 }
+                // The trust reason belongs on this path too, not only on connect()'s onFailure: a
+                // broker certificate that expires or rotates after a working connection is rejected
+                // during an automaticReconnect handshake, which surfaces here. Without the append,
+                // the likeliest real trust failure in the field still reports as a bare
+                // CONNECTION_LOST wrapping a handshake error that names no certificate.
+                String trustFailure = attemptTrustFailure == null ? null : attemptTrustFailure.reason();
+                String errorMsg = describeConnectFailure(cause, trustFailure);
                 Log.w(TAG, "MQTT connection lost: " + errorMsg);
                 sendEvent("MqttDisconnected", "Connection lost: " + errorMsg);
             }
@@ -565,8 +575,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         StringBuilder description = new StringBuilder();
-        // Identity, not equals: a cause chain can loop, and Throwable does not override equals.
-        Set<Throwable> visited = new HashSet<>();
+        // Identity, not equals: a cause chain can loop, and a Throwable that does override equals
+        // would otherwise end the walk at the first distinct-but-equal level, dropping the root cause
+        // this method exists to surface. HashSet would give identity only by accident of Throwable
+        // not overriding it.
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         Throwable current = throwable;
         while (current != null && visited.add(current)) {
             if (description.length() > 0) {
@@ -612,25 +625,48 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * The trust manager's own rejection reason for the current connect attempt, or null when it has
-     * not rejected anything. Conscrypt reports a rejected certificate as a handshake failure and
+     * One connect attempt's trust verdict: the trust manager's own rejection reason, or null when it
+     * has not rejected anything. Conscrypt reports a rejected certificate as a handshake failure and
      * Paho wraps that again, and neither layer is required to carry the {@link CertificateException}
      * message through, so the reason is captured where it is produced.
      *
+     * Held per attempt rather than per module, because an attempt's client outlives the attempt:
+     * {@link #cleanupConnection(MqttAndroidClient)} deliberately leaves a superseded client connected
+     * when a replacement already owns the handle, so that client keeps its own SSLContext and can
+     * still run handshakes under automaticReconnect. One field shared across attempts lets a stale
+     * client's accepting handshake record null over the live attempt's real rejection reason — which
+     * puts the report back to the bare "MqttException" this flattening exists to replace — or lets its
+     * rejection be reported as the cause of an unrelated failure. A holder per attempt makes both
+     * unreachable without an identity guard on either side: a superseded client's trust manager holds
+     * only its own holder, so it cannot reach the live attempt's.
+     *
      * Written from the TLS handshake thread, read from Paho's callback thread.
      */
-    private volatile String lastTrustFailure;
+    static final class TrustFailureHolder implements TrustFailureRecorder {
+        private volatile String reason;
+
+        @Override
+        public void record(String reason) {
+            this.reason = reason;
+        }
+
+        /** Why this attempt's most recent handshake rejected the broker, or null if it passed. */
+        String reason() {
+            return reason;
+        }
+    }
 
     /**
-     * Why a connect attempt failed: the flattened exception chain, plus the trust manager's
-     * rejection reason when the handshake stack dropped it on the way up. Only appended when the
-     * chain does not already carry it, since Conscrypt often does preserve it.
+     * Why an attempt failed: the flattened exception chain, plus the trust manager's rejection
+     * reason when the handshake stack dropped it on the way up. Only appended when the chain does
+     * not already carry it, since Conscrypt often does preserve it.
+     *
+     * @param trustFailure the attempt's {@link TrustFailureHolder#reason()}, or null.
      */
-    private String describeConnectFailure(Throwable exception) {
+    static String describeConnectFailure(Throwable exception, String trustFailure) {
         String description = describeThrowable(exception);
-        String trustFailure = lastTrustFailure;
         if (trustFailure != null && !description.contains(trustFailure)) {
-            description = description + " | broker certificate rejected: " + trustFailure;
+            return description + " | broker certificate rejected: " + trustFailure;
         }
         return description;
     }
@@ -1125,8 +1161,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.i(TAG, "Key: " + privateKeyAlias + " (software)");
 
             // Belongs to one attempt: a reason left over from a previous connection would be
-            // reported as this attempt's root cause.
-            lastTrustFailure = null;
+            // reported as this attempt's root cause. Created here and handed to both the trust
+            // manager that writes it and the callbacks that read it, so no other attempt's client can
+            // reach it — see TrustFailureHolder.
+            final TrustFailureHolder attemptTrustFailure = new TrustFailureHolder();
 
             final MqttAndroidClient attemptClient = new MqttAndroidClient(
                     getReactApplicationContext(),
@@ -1150,11 +1188,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     effectiveSniHost,   // null for admin — skips SNI/SAN pin (chain validation still runs)
                     keystorePath,
                     keystorePassword,
-                    keystoreFormat);
+                    keystoreFormat,
+                    attemptTrustFailure);
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
-            attemptClient.setCallback(createAttemptCallback(attemptClient));
+            attemptClient.setCallback(createAttemptCallback(attemptClient, attemptTrustFailure));
 
             attemptClient.connect(options, null, new IMqttActionListener() {
                 @Override
@@ -1165,7 +1204,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                    String errorMessage = describeConnectFailure(exception);
+                    String errorMessage = describeConnectFailure(exception, attemptTrustFailure.reason());
                     Log.e(TAG, "MQTT CONNECTION FAILED: " + errorMessage, exception);
 
                     // Nothing this client does can recover an unusable cached connection, so evict
@@ -1208,7 +1247,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String expectedSniHost,
             String keystorePath,
             String keystorePassword,
-            String keystoreFormat) throws Exception {
+            String keystoreFormat,
+            TrustFailureRecorder trustFailureRecorder) throws Exception {
 
         Log.d(TAG, "Creating SSL context with software-backed key");
 
@@ -1278,7 +1318,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         TrustManager[] trustManagers = new TrustManager[] {
                 new CustomTrustManager(trustStore, expectedBrokerCN, expectedSniHost,
-                        reason -> lastTrustFailure = reason)
+                        trustFailureRecorder)
         };
 
         // Create SSL context with TLS 1.3
@@ -1763,7 +1803,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
     }
 
     /** Joins the per-format keystore load failures into one clause. */
-    private static String describeLoadFailures(List<String> loadFailures) {
+    static String describeLoadFailures(List<String> loadFailures) {
         if (loadFailures.isEmpty()) {
             return "No load attempt reported a reason.";
         }

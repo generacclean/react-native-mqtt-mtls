@@ -2,18 +2,13 @@ import Foundation
 import Security
 import os.log
 
-/// Server-certificate trust validation for the MQTT TLS handshake.
-///
-/// This sits apart from `MqttModule` and depends only on Foundation and Security, so it compiles
-/// without React Native or CocoaMQTT. That is what lets `swift test` exercise it directly — see
-/// `Package.swift` and `TrustValidatorTests.swift`. `MqttModule`'s `didReceive trust:` delegate is
-/// a thin wrapper over `evaluate(trust:expectedCN:anchors:log:)`.
 /// The outcome of server-trust validation, carrying why a rejection happened.
 ///
 /// The reason is part of the result rather than log-only because the TLS stack discards it: CocoaMQTT
 /// takes a bare `Bool` from the trust delegate, so everything below reaches JS as a generic
-/// disconnect. The module holds the reason for the current attempt and attaches it to the connect
-/// error callback, which is what puts an actionable cause in a crash report.
+/// disconnect. The module holds the reason for the current attempt and attaches it to whichever
+/// report the drop produces — the connect error callback, or the disconnect event when the rejection
+/// happened during an auto-reconnect — which is what puts an actionable cause in a crash report.
 enum TrustValidationResult: Equatable {
     case trusted
     case rejected(reason: String)
@@ -33,6 +28,12 @@ enum TrustValidationResult: Equatable {
     }
 }
 
+/// Server-certificate trust validation for the MQTT TLS handshake.
+///
+/// This sits apart from `MqttModule` and depends only on Foundation and Security, so it compiles
+/// without React Native or CocoaMQTT. That is what lets `swift test` exercise it directly — see
+/// `Package.swift` and `TrustValidatorTests.swift`. `MqttModule`'s `didReceive trust:` delegate is
+/// a thin wrapper over `evaluate(trust:expectedCN:anchors:log:)`.
 enum TrustValidator {
 
     /// Validates a server's TLS trust object. Chain validation against the app-provided anchors is

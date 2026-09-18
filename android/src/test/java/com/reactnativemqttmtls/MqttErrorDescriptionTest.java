@@ -8,6 +8,8 @@ import org.robolectric.annotation.Config;
 
 import java.io.IOException;
 import java.security.cert.CertificateException;
+import java.util.Arrays;
+import java.util.Collections;
 
 import javax.net.ssl.SSLHandshakeException;
 
@@ -107,6 +109,75 @@ public class MqttErrorDescriptionTest {
         String description = MqttModule.describeThrowable(first);
 
         assertEquals("Looping: first <- caused by Looping: second", description);
+    }
+
+    @Test
+    public void testTrustRejectionIsAppendedWhenTheChainDropsIt() {
+        // What the append is for: Conscrypt is free to report a rejected certificate as a bare
+        // handshake failure, and Paho wraps that again, so the chain alone names no certificate. The
+        // reason the trust manager recorded is the only place it survives.
+        MqttException wrapped = new MqttException(new SSLHandshakeException("Handshake failed"));
+
+        String description = MqttModule.describeConnectFailure(wrapped,
+                "CertificateException: Broker CN mismatch: got broker.example.com, expected inverter-42");
+
+        assertTrue("The chain should still be reported: " + description,
+                description.contains("SSLHandshakeException: Handshake failed"));
+        assertTrue("The recorded reason should be appended: " + description,
+                description.endsWith(" | broker certificate rejected: CertificateException: "
+                        + "Broker CN mismatch: got broker.example.com, expected inverter-42"));
+    }
+
+    @Test
+    public void testTrustRejectionIsNotRepeatedWhenTheChainAlreadyCarriesIt() {
+        // Conscrypt often does preserve the CertificateException, in which case appending would say
+        // the same thing twice in one line.
+        CertificateException root = new CertificateException("Broker CN mismatch");
+        SSLHandshakeException handshake = new SSLHandshakeException("Handshake failed");
+        handshake.initCause(root);
+        MqttException wrapped = new MqttException(handshake);
+
+        String description = MqttModule.describeConnectFailure(wrapped,
+                "CertificateException: Broker CN mismatch");
+
+        assertFalse("The reason should not be appended a second time: " + description,
+                description.contains("broker certificate rejected"));
+        assertTrue("The reason should still be present, from the chain: " + description,
+                description.contains("CertificateException: Broker CN mismatch"));
+    }
+
+    @Test
+    public void testNoTrustRejectionLeavesTheChainAlone() {
+        // An unreachable broker never reaches the trust manager, so nothing should be appended.
+        MqttException unreachable = new MqttException(MqttException.REASON_CODE_SERVER_CONNECT_ERROR);
+
+        String description = MqttModule.describeConnectFailure(unreachable, null);
+
+        assertEquals(MqttModule.describeThrowable(unreachable), description);
+    }
+
+    @Test
+    public void testLoadFailuresWithNoReasonSaysSo() {
+        // Reporting nothing here would leave the thrown KeyException claiming the keystore could not
+        // be read while naming no reason at all, which is the gap describeLoadFailures closes.
+        assertEquals("No load attempt reported a reason.",
+                MqttModule.describeLoadFailures(Collections.<String>emptyList()));
+    }
+
+    @Test
+    public void testSingleLoadFailureIsReportedWithoutASeparator() {
+        assertEquals("Load attempts: encrypted: AEADBadTagException",
+                MqttModule.describeLoadFailures(
+                        Collections.singletonList("encrypted: AEADBadTagException")));
+    }
+
+    @Test
+    public void testEveryLoadFailureIsReported() {
+        // Auto-detect tries both formats, and which one failed how is the whole diagnostic — keeping
+        // only the last attempt would hide that the keystore was written by a different MasterKey.
+        assertEquals("Load attempts: encrypted: AEADBadTagException; pkcs12: wrong password",
+                MqttModule.describeLoadFailures(Arrays.asList(
+                        "encrypted: AEADBadTagException", "pkcs12: wrong password")));
     }
 
     /** A throwable whose cause can be pointed back up the chain, which initCause forbids. */
