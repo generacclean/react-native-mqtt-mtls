@@ -1044,9 +1044,11 @@ extension MqttModule: CocoaMQTTDelegate {
             // The "Connection failed: " prefix is load-bearing: the app classifies this string, and a
             // socket timeout has to keep reading as one.
             var reported = "Connection failed: \(errorMsg)"
-            if let trustFailure = lastTrustFailure {
-                // What the transport error cannot say. Our own trust validator refused the broker,
-                // so the handshake failure below it is a consequence, not the cause.
+            // What the transport error cannot say. Our own trust validator refused the broker, so
+            // the handshake failure below it is a consequence, not the cause. Skipped when the
+            // chain already carries the reason, matching Android's guard — CocoaMQTT cannot
+            // surface it today, but that is its choice to change, not a guarantee to build on.
+            if let trustFailure = lastTrustFailure, !reported.contains(trustFailure) {
                 reported += " | broker certificate rejected: \(trustFailure)"
             }
             errorCallback([reported])

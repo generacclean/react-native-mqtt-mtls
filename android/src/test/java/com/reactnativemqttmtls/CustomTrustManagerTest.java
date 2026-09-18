@@ -382,19 +382,31 @@ public class CustomTrustManagerTest {
     }
 
     @Test
-    public void testAcceptedCertificate_RecordsNothing() throws Exception {
-        // A stale reason from an earlier attempt must not be attached to a later failure, so the
-        // accepting path stays silent.
+    public void testAcceptedCertificate_ClearsAnEarlierRejection() throws Exception {
+        // A stale reason from an earlier attempt must not be attached to a later failure. An
+        // auto-reconnect re-runs the trust manager without going through connect(), so clearing on
+        // the accepting path is the only thing that drops it. Reject first, so the recorder holds a
+        // reason: asserting null on a recorder that was never written would pass even if the
+        // accepting path recorded nothing at all.
         X509Certificate root = cert(ROOT_PEM);
         X509Certificate intermediate = cert(INTERMEDIATE_PEM);
         X509Certificate broker = cert(BROKER_PEM);
+        X509Certificate forged = cert(FORGED_PEM);
 
         AtomicReference<String> recorded = new AtomicReference<>();
         Object tm = newTrustManager(trustStoreWith(root), null, null, recorded::set);
 
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { forged });
+            fail("A self-signed impostor must be rejected");
+        } catch (CertificateException expected) {
+            // Sets up the state the accepting path has to clear.
+        }
+        assertNotNull("Precondition: the rejection must have been recorded", recorded.get());
+
         checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
 
-        assertNull("An accepted certificate must not record a rejection reason", recorded.get());
+        assertNull("An accepted certificate must clear the earlier rejection reason", recorded.get());
     }
 
     // ========================================================================

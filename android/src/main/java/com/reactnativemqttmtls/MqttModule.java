@@ -593,10 +593,11 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         String message = throwable.getMessage();
+        String trimmed = message == null ? null : message.trim();
         // A message equal to the type name carries nothing the type has not already said, and it is
         // what Paho's message bundle returns for a reason code it has no entry for.
-        if (message != null && !message.trim().isEmpty() && !message.trim().equals(typeName)) {
-            text.append(": ").append(message.trim());
+        if (trimmed != null && !trimmed.isEmpty() && !trimmed.equals(typeName)) {
+            text.append(": ").append(trimmed);
         }
         return text.toString();
     }
