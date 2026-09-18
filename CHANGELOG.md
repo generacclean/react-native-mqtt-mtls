@@ -2,10 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.6.0] - 2026-09-18
 
 ### Fixed
 
+- **Every mTLS connection failure reached the app as one uninformative string**
+  ([IA-6331](https://generacet.atlassian.net/browse/IA-6331))
+  - A staging crash report's entire diagnostic content was the word `MqttException`. A rejected
+    broker certificate, an unreachable host, an unreadable keystore, and a broker refusing the
+    connection were indistinguishable once they crossed the bridge.
+  - Root cause on Android: Paho wraps the real failure in an `MqttException` with reason code 0
+    (`CLIENT_EXCEPTION`), and `MqttException.getMessage()` never consults the cause — it looks the
+    reason code up in a `ResourceBundle` that has no entry for 0, so `ResourceBundleCatalog` returns
+    its fallback, the literal string `"MqttException"`. Reading only the top-level message was
+    therefore guaranteed to be uninformative no matter what failed. On iOS the equivalent trap is
+    `localizedDescription` alone: Security and Network framework errors describe themselves with a
+    generic sentence and keep the identifying detail in the domain, the code, and an
+    `NSUnderlyingErrorKey` one or more levels down.
+  - Error strings now carry the whole cause chain, outermost first, joined by `<- caused by`. Each
+    level contributes its type, the Paho reason code and its name where it has one (Android) or the
+    error domain and code (iOS), and its message when that adds anything. This covers connect,
+    `connectionLost`, subscribe, unsubscribe, publish, disconnect, and cleanup.
+  - A rejected broker certificate is now named. Neither platform's TLS stack is required to carry the
+    trust manager's `CertificateException` up to the caller, and CocoaMQTT's trust delegate returns a
+    bare `Bool`, so the reason was being produced and then discarded. Both platforms now capture it
+    where it is produced and append it to the connect failure as
+    `| broker certificate rejected: <reason>`.
+  - Keystore loading reports why each format was refused, so a wrong password, a corrupt file, and a
+    missing `MasterKey` are distinguishable from the failure string alone.
+  - No API change: `onError` and the native error callbacks still take a `string`. Consumers that
+    classify by substring keep working — the added text is appended, never substituted — and a
+    classifier that previously fell through to "unknown" for a TLS failure now has `ssl`,
+    `certificate`, or `trust` to match on.
 - **Events from a superseded connection attempt were attributed to the current one**
   ([GREM-64](https://generacet.atlassian.net/browse/GREM-64))
   - A reconnect supersedes the previous client, but the old one keeps emitting: on Android the Paho
@@ -70,6 +98,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **`cleanup` was missing from the JS module on iOS**
+
   - Every app start logged `The Objective-C cleanup:(RCTResponseSenderBlock)successCallback
 errorCallback:(RCTResponseSenderBlock)errorCallback method signature for the JS method cleanup
 can not be found in the Objective-C definition of the MqttModule module.` React Native then

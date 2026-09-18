@@ -2,6 +2,32 @@ import Foundation
 import Security
 import os.log
 
+/// The outcome of server-trust validation, carrying why a rejection happened.
+///
+/// The reason is part of the result rather than log-only because the TLS stack discards it: CocoaMQTT
+/// takes a bare `Bool` from the trust delegate, so everything below reaches JS as a generic
+/// disconnect. The module holds the reason for the current attempt and attaches it to whichever
+/// report the drop produces — the connect error callback, or the disconnect event when the rejection
+/// happened during an auto-reconnect — which is what puts an actionable cause in a crash report.
+enum TrustValidationResult: Equatable {
+    case trusted
+    case rejected(reason: String)
+
+    var isTrusted: Bool {
+        return self == .trusted
+    }
+
+    /// Why the server was rejected, or nil when it was trusted.
+    var rejectionReason: String? {
+        switch self {
+        case .trusted:
+            return nil
+        case .rejected(let reason):
+            return reason
+        }
+    }
+}
+
 /// Server-certificate trust validation for the MQTT TLS handshake.
 ///
 /// This sits apart from `MqttModule` and depends only on Foundation and Security, so it compiles
@@ -19,16 +45,16 @@ enum TrustValidator {
     ///   - expectedCN: The known device CN to pin against, or nil/empty to skip CN pinning.
     ///   - anchors: The app-provided root CA certificate(s) to validate the chain against.
     ///   - log: Destination for the validation trace.
-    /// - Returns: true if the server should be trusted.
+    /// - Returns: `.trusted`, or `.rejected` with the reason.
     static func evaluate(trust: SecTrust,
                          expectedCN: String?,
                          anchors: [SecCertificate],
-                         log: OSLog) -> Bool {
+                         log: OSLog) -> TrustValidationResult {
         // STEP 1: Validate the server's certificate chain against our app-provided root CA(s).
         // This runs unconditionally, admin or not — an unset CN only ever skips the pin below.
         guard !anchors.isEmpty else {
             os_log("  ✗ No trusted root CA certificates configured — rejecting", log: log, type: .error)
-            return false
+            return .rejected(reason: "no trusted root CA certificates configured")
         }
 
         // Basic X.509 rather than an SSL policy: the SSL policy bundle enforces Apple's maximum
@@ -69,40 +95,41 @@ enum TrustValidator {
               anchorsOnlyStatus == errSecSuccess else {
             os_log("  ✗ Could not restrict trust to app-provided anchors — rejecting (policy: %d, anchors: %d, anchorsOnly: %d)",
                    log: log, type: .error, policyStatus, anchorStatus, anchorsOnlyStatus)
-            return false
+            return .rejected(reason: "could not restrict trust to app-provided anchors "
+                             + "(policy: \(policyStatus), anchors: \(anchorStatus), anchorsOnly: \(anchorsOnlyStatus))")
         }
 
         var trustError: CFError?
         guard SecTrustEvaluateWithError(trust, &trustError) else {
-            os_log("  ✗ Certificate chain validation FAILED: %{public}@", log: log, type: .error,
-                   (trustError as Error?)?.localizedDescription ?? "unknown error")
-            return false
+            let reason = ErrorDescription.describe(trustError as Error?)
+            os_log("  ✗ Certificate chain validation FAILED: %{public}@", log: log, type: .error, reason)
+            return .rejected(reason: "certificate chain validation failed: \(reason)")
         }
         os_log("  ✓ Certificate chain validated against app-provided anchor(s)", log: log, type: .info)
 
         // STEP 2: CN pinning — skipped when no expected CN is configured (admin users).
         guard let expectedCN, !expectedCN.isEmpty else {
             os_log("  - No expected CN configured — CN pin skipped", log: log, type: .info)
-            return true
+            return .trusted
         }
 
         guard let serverCert = leafCertificate(from: trust) else {
             os_log("  ✗ Cannot retrieve server certificate", log: log, type: .error)
-            return false
+            return .rejected(reason: "cannot retrieve the server's leaf certificate")
         }
 
         guard let actualCN = commonName(from: serverCert, log: log) else {
             os_log("  ✗ Cannot extract CN from server certificate", log: log, type: .error)
-            return false
+            return .rejected(reason: "cannot extract a CN from the server certificate")
         }
 
         guard actualCN == expectedCN else {
             os_log("  ✗ CN MISMATCH! Expected: %{public}@, Actual: %{public}@",
                    log: log, type: .error, expectedCN, actualCN)
-            return false
+            return .rejected(reason: "CN mismatch (expected \(expectedCN), got \(actualCN))")
         }
         os_log("  ✓ CN matches: %{public}@", log: log, type: .info, actualCN)
-        return true
+        return .trusted
     }
 
     /// Retrieves the leaf certificate from a trust object.

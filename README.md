@@ -77,10 +77,10 @@ public class MainApplication extends Application implements ReactApplication {
 ### 1. Wrap Your App with MqttProvider
 
 ```tsx
-import React from 'react';
-import { MqttProvider } from 'react-native-mqtt-mtls';
-import { NavigationContainer } from '@react-navigation/native';
-import AppNavigator from './navigation/AppNavigator';
+import React from "react";
+import { MqttProvider } from "react-native-mqtt-mtls";
+import { NavigationContainer } from "@react-navigation/native";
+import AppNavigator from "./navigation/AppNavigator";
 
 export default function App() {
   return (
@@ -96,9 +96,9 @@ export default function App() {
 ### 2. Use MQTT in Any Screen
 
 ```tsx
-import React, { useEffect, useState } from 'react';
-import { View, Text, Button, StyleSheet } from 'react-native';
-import { useMqtt } from 'react-native-mqtt-mtls';
+import React, { useEffect, useState } from "react";
+import { View, Text, Button, StyleSheet } from "react-native";
+import { useMqtt } from "react-native-mqtt-mtls";
 
 const ChatScreen = () => {
   const { isConnected, connect, disconnect, publish, subscribe } = useMqtt();
@@ -109,35 +109,40 @@ const ChatScreen = () => {
     const connectToMqtt = async () => {
       try {
         await connect({
-          broker: 'ssl://mqtt.example.com:8883',
-          clientId: 'my-app-client-123',
+          broker: "ssl://mqtt.example.com:8883",
+          clientId: "my-app-client-123",
           certificates: {
-            clientCert: '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----',
-            privateKeyAlias: 'my-key-alias', // Key stored in Android KeyStore
-            rootCa: '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----',
+            clientCert:
+              "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            privateKeyAlias: "my-key-alias", // Key stored in Android KeyStore
+            rootCa:
+              "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
           },
           onMessage: (message) => {
-            console.log('Received:', message.topic, message.message);
-            setMessages((prev) => [...prev, `${message.topic}: ${message.message}`]);
+            console.log("Received:", message.topic, message.message);
+            setMessages((prev) => [
+              ...prev,
+              `${message.topic}: ${message.message}`,
+            ]);
           },
           onConnect: () => {
-            console.log('Connected to MQTT broker');
+            console.log("Connected to MQTT broker");
           },
           onConnectionLost: (error) => {
-            console.log('Connection lost:', error);
+            console.log("Connection lost:", error);
           },
           onReconnect: () => {
-            console.log('Reconnected to MQTT broker');
+            console.log("Reconnected to MQTT broker");
           },
           onError: (error) => {
-            console.error('MQTT error:', error);
+            console.error("MQTT error:", error);
           },
         });
 
         // Subscribe to a topic after connecting
-        await subscribe('chat/room1', 1);
+        await subscribe("chat/room1", 1);
       } catch (error) {
-        console.error('Failed to connect:', error);
+        console.error("Failed to connect:", error);
       }
     };
 
@@ -151,16 +156,20 @@ const ChatScreen = () => {
 
   const sendMessage = async () => {
     try {
-      await publish('chat/room1', 'Hello from React Native!', 1);
+      await publish("chat/room1", "Hello from React Native!", 1);
     } catch (error) {
-      console.error('Failed to publish:', error);
+      console.error("Failed to publish:", error);
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text>Status: {isConnected ? 'Connected' : 'Disconnected'}</Text>
-      <Button title="Send Message" onPress={sendMessage} disabled={!isConnected} />
+      <Text>Status: {isConnected ? "Connected" : "Disconnected"}</Text>
+      <Button
+        title="Send Message"
+        onPress={sendMessage}
+        disabled={!isConnected}
+      />
       {messages.map((msg, index) => (
         <Text key={index}>{msg}</Text>
       ))}
@@ -234,6 +243,34 @@ cannot emit: its late `onMessage` or `onConnectionLost` is dropped natively rath
 The JS layer has no per-attempt routing of its own, so an event already in flight when you call
 `connect()` can still reach the new attempt's handlers.
 
+### Error strings
+
+Every error callback — `onError`, `onConnectionLost`, and the rejection of each promise — receives a
+free-text string, not a structured error. It is assembled for a human reading a crash report, so
+treat it as diagnostic text: match on substrings if you must classify, but expect the wording to gain
+detail between versions.
+
+The string flattens the whole cause chain, outermost first:
+
+```
+MqttException(reasonCode=0 CLIENT_EXCEPTION) <- caused by SSLHandshakeException: Handshake failed
+  <- caused by CertificateException: Server certificate chain validation failed
+  | broker certificate rejected: CertificateException: Server certificate chain validation failed:
+    Trust anchor for certification path not found
+```
+
+- Each level names its type, then its message when that adds anything. On Android an `MqttException`
+  also carries Paho's reason code and its name; on iOS each level carries the error domain and code.
+  Flattening is the point: Paho reports unrelated failures alike as an `MqttException` whose own
+  message is the useless literal `"MqttException"`, and iOS `localizedDescription` is often a generic
+  sentence, so only the levels below identify the failure.
+- A `| broker certificate rejected: …` clause means this library's own trust manager refused the
+  broker's certificate. It is appended because neither platform's TLS stack reliably carries that
+  reason to the caller — CocoaMQTT's trust delegate returns a bare `Bool` — so the handshake error
+  above it is a consequence, not the cause.
+- A failure to read the client keystore lists what each format attempt reported, which separates a
+  wrong password from a corrupt file or a missing `MasterKey`.
+
 ### `disconnect()`
 
 Disconnects from the MQTT broker.
@@ -259,6 +296,7 @@ The `isAdminUser` configuration option controls certificate verification behavio
 #### **Default: `false` (Secure-by-Default - Recommended for Production)**
 
 When `isAdminUser` is `false` (or omitted), the library enforces **full certificate verification**:
+
 - ✅ SNI hostname verification, **Android only** (requires `sniHostname` in config): the value is
   matched against the broker certificate's subjectAltName entries (DNS and iPAddress, exact match,
   no wildcards). On iOS `sniHostname` is only announced as the TLS SNI hostname — trust evaluation
@@ -269,25 +307,30 @@ When `isAdminUser` is `false` (or omitted), the library enforces **full certific
 - ✅ Protection against man-in-the-middle attacks
 
 **Production Example:**
+
 ```tsx
 await connect({
-  broker: 'ssl://mqtt.example.com:8883',
-  clientId: 'production-client',
-  isAdminUser: false,  // Explicit (or omit, same behavior)
-  sniHostname: 'mqtt.example.com',
-  brokerCommonName: 'mqtt.example.com',
-  certificates: { /* ... */ },
+  broker: "ssl://mqtt.example.com:8883",
+  clientId: "production-client",
+  isAdminUser: false, // Explicit (or omit, same behavior)
+  sniHostname: "mqtt.example.com",
+  brokerCommonName: "mqtt.example.com",
+  certificates: {
+    /* ... */
+  },
 });
 ```
 
 #### **Admin Mode: `true` (Disables Certificate Verification)**
 
 ⚠️ **SECURITY WARNING**: When `isAdminUser` is `true`, certificate verification is **disabled**:
+
 - ❌ NO SNI hostname verification
 - ❌ NO Common Name pinning
-- ⚠️  Vulnerable to man-in-the-middle attacks
+- ⚠️ Vulnerable to man-in-the-middle attacks
 
 **Only use admin mode for:**
+
 - 🔧 Development/testing environments
 - 🔧 Local brokers with self-signed certificates
 - 🔧 Internal networks where security is handled at network layer
@@ -295,13 +338,16 @@ await connect({
 **DO NOT use admin mode in production unless you fully understand the security implications.**
 
 **Dev/Test Example:**
+
 ```tsx
 await connect({
-  broker: 'ssl://localhost:8883',
-  clientId: 'dev-client',
-  isAdminUser: true,  // ONLY for dev/test!
+  broker: "ssl://localhost:8883",
+  clientId: "dev-client",
+  isAdminUser: true, // ONLY for dev/test!
   // sniHostname and brokerCommonName are ignored when isAdminUser is true
-  certificates: { /* ... */ },
+  certificates: {
+    /* ... */
+  },
 });
 ```
 
@@ -363,6 +409,7 @@ The library uses a two-tier detection strategy for incoming messages:
 2. **UTF-8 heuristic (fallback)**: Unknown topics are classified by attempting UTF-8 decoding
 
 **⚠️ Limitation**: The UTF-8 fallback can **misclassify small protobuf messages** with all-ASCII content as text. This occurs when:
+
 - The topic is not in the predefined binary/text pattern list
 - The protobuf payload contains only low-value bytes (< 0x80) — e.g., small field numbers, ASCII strings, low numeric values
 - The payload happens to be valid UTF-8
@@ -370,6 +417,7 @@ The library uses a two-tier detection strategy for incoming messages:
 **Impact**: If your application subscribes to topics not covered by the built-in patterns and those topics carry binary protobuf data, you may receive `isBinary: false` and a string instead of a `Uint8Array`. Downstream protobuf decoding will fail silently.
 
 **Workarounds**:
+
 1. **Add your topic patterns** to the detection logic in `MqttModule.java` (Android) and `MqttModule.swift` (iOS)
 2. **Use explicit binary topics**: Structure your topic hierarchy to include keywords like `/proto/`, `/device`, or `/firmware`
 3. **Type-check in handlers**: Always verify `typeof message === 'string'` before assuming text, and handle unexpected types gracefully

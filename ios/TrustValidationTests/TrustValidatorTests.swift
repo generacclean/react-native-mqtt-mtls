@@ -218,6 +218,13 @@ final class TrustValidatorTests: XCTestCase {
     }
 
     private func evaluate(_ trust: SecTrust, expectedCN: String?, anchors: [SecCertificate]) -> Bool {
+        return evaluateForResult(trust, expectedCN: expectedCN, anchors: anchors).isTrusted
+    }
+
+    /// For the cases that assert on *why* a server was rejected rather than only that it was.
+    private func evaluateForResult(_ trust: SecTrust,
+                                   expectedCN: String?,
+                                   anchors: [SecCertificate]) -> TrustValidationResult {
         return TrustValidator.evaluate(trust: trust, expectedCN: expectedCN, anchors: anchors, log: Self.log)
     }
 
@@ -368,6 +375,65 @@ final class TrustValidatorTests: XCTestCase {
         let cn = TrustValidator.commonName(from: broker, log: Self.log)
 
         XCTAssertEqual(cn, "penguin-broker.local", "CN extraction must read the subject CN")
+    }
+
+    // MARK: - Rejection reasons
+    //
+    // CocoaMQTT's trust delegate returns a bare Bool, so a rejection reaches the app as an ordinary
+    // transport disconnect. The reason therefore has to travel in the result for MqttModule to attach
+    // it to the connect error callback; without it, every case below is indistinguishable in a crash
+    // report from an unreachable broker.
+
+    func testTrustedResult_CarriesNoReason() {
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        let result = evaluateForResult(trust, expectedCN: nil, anchors: [root])
+
+        XCTAssertEqual(result, .trusted)
+        XCTAssertNil(result.rejectionReason, "A trusted result must not leave a reason for the next failure to pick up")
+    }
+
+    func testChainFailure_ReasonNamesTheChainAndItsCause() {
+        let forged = Self.certificate(fromPEM: Self.forgedPEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [forged])
+
+        let reason = evaluateForResult(trust, expectedCN: nil, anchors: [root]).rejectionReason
+
+        XCTAssertNotNil(reason)
+        XCTAssertTrue(reason?.contains("certificate chain validation failed") ?? false,
+                      "Expected the chain failure to be named, got: \(reason ?? "nil")")
+        // The Security framework's own text, which is what says *how* the chain failed.
+        XCTAssertTrue(reason?.contains("NSOSStatusErrorDomain") ?? false
+                      || reason?.contains("code=") ?? false,
+                      "Expected the underlying trust error to be carried, got: \(reason ?? "nil")")
+    }
+
+    func testCNMismatch_ReasonNamesBothNames() {
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+        let intermediate = Self.certificate(fromPEM: Self.intermediatePEM)
+        let root = Self.certificate(fromPEM: Self.rootPEM)
+
+        let trust = Self.makeTrust(presenting: [broker, intermediate])
+
+        let reason = evaluateForResult(trust, expectedCN: "some-other-device.local", anchors: [root]).rejectionReason
+
+        XCTAssertEqual(reason, "CN mismatch (expected some-other-device.local, got penguin-broker.local)")
+    }
+
+    func testNoAnchors_ReasonNamesTheMissingConfiguration() {
+        let broker = Self.certificate(fromPEM: Self.brokerPEM)
+
+        let trust = Self.makeTrust(presenting: [broker])
+
+        let reason = evaluateForResult(trust, expectedCN: nil, anchors: []).rejectionReason
+
+        XCTAssertEqual(reason, "no trusted root CA certificates configured")
     }
 
     // MARK: - Extended key usage

@@ -757,6 +757,45 @@ public class MqttModuleTest {
     }
 
     @Test
+    public void testAttemptCallback_ConnectionLostNamesTheAttemptsTrustRejection() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
+        MqttModule.TrustFailureHolder attemptTrustFailure = new MqttModule.TrustFailureHolder();
+        attemptTrustFailure.record("CertificateException: Server certificate has expired");
+        MqttCallbackExtended callback = createAttemptCallback(currentClient, attemptTrustFailure);
+        setClient(currentClient);
+
+        // The likeliest real trust failure in the field: a broker certificate that expires or rotates
+        // while connected is rejected during automaticReconnect, so the drop arrives here rather than
+        // at connect()'s onFailure, carrying a code that names no certificate.
+        callback.connectionLost(new MqttException(MqttException.REASON_CODE_CONNECTION_LOST));
+
+        ArgumentCaptor<Object> body = ArgumentCaptor.forClass(Object.class);
+        verify(emitter).emit(eq("MqttDisconnected"), body.capture());
+        String reported = (String) body.getValue();
+        assertTrue("Should keep Paho's own reason: " + reported,
+                reported.contains("reasonCode=32109 CONNECTION_LOST"));
+        assertTrue("Should name the certificate as the cause: " + reported,
+                reported.contains("broker certificate rejected: "
+                        + "CertificateException: Server certificate has expired"));
+    }
+
+    @Test
+    public void testAttemptCallback_ConnectionLostWithNoRejectionReportsOnlyTheDrop() throws Exception {
+        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
+        MqttAndroidClient currentClient = mock(MqttAndroidClient.class);
+        MqttCallbackExtended callback = createAttemptCallback(currentClient);
+        setClient(currentClient);
+
+        callback.connectionLost(new RuntimeException("socket closed"));
+
+        ArgumentCaptor<Object> body = ArgumentCaptor.forClass(Object.class);
+        verify(emitter).emit(eq("MqttDisconnected"), body.capture());
+        String reported = (String) body.getValue();
+        assertEquals("Connection lost: RuntimeException: socket closed", reported);
+    }
+
+    @Test
     public void testAttemptCallback_EmitsNothingOnceTheClientIsTornDown() throws Exception {
         DeviceEventManagerModule.RCTDeviceEventEmitter emitter = stubEmitter();
         MqttAndroidClient client = mock(MqttAndroidClient.class);
@@ -824,9 +863,15 @@ public class MqttModuleTest {
     }
 
     private MqttCallbackExtended createAttemptCallback(MqttAndroidClient attemptClient) throws Exception {
-        Method method = MqttModule.class.getDeclaredMethod("createAttemptCallback", MqttAndroidClient.class);
+        return createAttemptCallback(attemptClient, new MqttModule.TrustFailureHolder());
+    }
+
+    private MqttCallbackExtended createAttemptCallback(MqttAndroidClient attemptClient,
+            MqttModule.TrustFailureHolder attemptTrustFailure) throws Exception {
+        Method method = MqttModule.class.getDeclaredMethod("createAttemptCallback",
+                MqttAndroidClient.class, MqttModule.TrustFailureHolder.class);
         method.setAccessible(true);
-        return (MqttCallbackExtended) method.invoke(mqttModule, attemptClient);
+        return (MqttCallbackExtended) method.invoke(mqttModule, attemptClient, attemptTrustFailure);
     }
 
     private void releaseClientResources(MqttAndroidClient disconnectedClient) throws Exception {

@@ -15,6 +15,7 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Collection;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.*;
 
@@ -221,13 +222,22 @@ public class CustomTrustManagerTest {
         return ks;
     }
 
-    /** Constructs the private CustomTrustManager(KeyStore, String, String) via reflection. */
+    /** Constructs the private CustomTrustManager via reflection, discarding rejection reasons. */
     private static Object newTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost)
             throws Exception {
+        return newTrustManager(trustStore, expectedBrokerCN, expectedSniHost, reason -> { });
+    }
+
+    /** As above, but with a recorder so a test can assert on the reported rejection reason. */
+    private static Object newTrustManager(KeyStore trustStore,
+                                         String expectedBrokerCN,
+                                         String expectedSniHost,
+                                         MqttModule.TrustFailureRecorder recorder) throws Exception {
         Class<?> clazz = Class.forName("com.reactnativemqttmtls.MqttModule$CustomTrustManager");
-        Constructor<?> ctor = clazz.getDeclaredConstructor(KeyStore.class, String.class, String.class);
+        Constructor<?> ctor = clazz.getDeclaredConstructor(
+                KeyStore.class, String.class, String.class, MqttModule.TrustFailureRecorder.class);
         ctor.setAccessible(true);
-        return ctor.newInstance(trustStore, expectedBrokerCN, expectedSniHost);
+        return ctor.newInstance(trustStore, expectedBrokerCN, expectedSniHost, recorder);
     }
 
     private static void checkServerTrusted(Object trustManager, X509Certificate[] chain) throws Exception {
@@ -340,6 +350,63 @@ public class CustomTrustManagerTest {
             assertTrue("Expected the no-leaf-certificate guard, got: " + e.getMessage(),
                     e.getMessage().contains("no leaf certificate"));
         }
+    }
+
+    // ========================================================================
+    // Rejection reporting — the reason has to survive the handshake
+    // ========================================================================
+
+    @Test
+    public void testRejection_ReasonReportedToRecorder() throws Exception {
+        // Conscrypt and Paho do not carry this CertificateException's message into the
+        // MqttException the JS layer sees, so the trust manager hands the reason to the module as
+        // it is produced. Without this, a certificate rejection reaches Sentry as "MqttException".
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate forged = cert(FORGED_PEM);
+
+        AtomicReference<String> recorded = new AtomicReference<>();
+        Object tm = newTrustManager(trustStoreWith(root), null, null, recorded::set);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { forged });
+            fail("A self-signed impostor must be rejected");
+        } catch (CertificateException expected) {
+            // The recorded reason is the assertion target.
+        }
+
+        assertNotNull("The rejection reason must be recorded", recorded.get());
+        assertTrue("Reason should name the failure: " + recorded.get(),
+                recorded.get().contains("Server certificate chain validation failed"));
+        assertTrue("Reason should keep the underlying cause: " + recorded.get(),
+                recorded.get().contains("caused by"));
+    }
+
+    @Test
+    public void testAcceptedCertificate_ClearsAnEarlierRejection() throws Exception {
+        // A stale reason from an earlier attempt must not be attached to a later failure. An
+        // auto-reconnect re-runs the trust manager without going through connect(), so clearing on
+        // the accepting path is the only thing that drops it. Reject first, so the recorder holds a
+        // reason: asserting null on a recorder that was never written would pass even if the
+        // accepting path recorded nothing at all.
+        X509Certificate root = cert(ROOT_PEM);
+        X509Certificate intermediate = cert(INTERMEDIATE_PEM);
+        X509Certificate broker = cert(BROKER_PEM);
+        X509Certificate forged = cert(FORGED_PEM);
+
+        AtomicReference<String> recorded = new AtomicReference<>();
+        Object tm = newTrustManager(trustStoreWith(root), null, null, recorded::set);
+
+        try {
+            checkServerTrusted(tm, new X509Certificate[] { forged });
+            fail("A self-signed impostor must be rejected");
+        } catch (CertificateException expected) {
+            // Sets up the state the accepting path has to clear.
+        }
+        assertNotNull("Precondition: the rejection must have been recorded", recorded.get());
+
+        checkServerTrusted(tm, new X509Certificate[] { broker, intermediate });
+
+        assertNull("An accepted certificate must clear the earlier rejection reason", recorded.get());
     }
 
     // ========================================================================

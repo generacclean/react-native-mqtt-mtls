@@ -364,7 +364,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         try {
             // Not null: the Kotlin fork's setCallback asserts non-null and throws on it. A callback
             // bound to no client is inert — every method's isCurrentClient guard fails.
-            disconnectedClient.setCallback(createAttemptCallback(null));
+            disconnectedClient.setCallback(createAttemptCallback(null, null));
         } catch (Exception e) {
             Log.w(TAG, "Callback detach error (non-critical): " + e.getMessage());
         }
@@ -398,8 +398,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
     /**
      * Builds the event callback for one connect attempt, bound to the client that created it. A null
      * client yields an inert callback, which is how {@link #releaseClientResources} detaches.
+     *
+     * @param attemptTrustFailure this attempt's trust verdict, read when the connection drops. Null
+     *                            for the inert callback, which reports nothing.
      */
-    private MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient) {
+    private MqttCallbackExtended createAttemptCallback(final MqttAndroidClient attemptClient,
+            final TrustFailureHolder attemptTrustFailure) {
         return new MqttCallbackExtended() {
             @Override
             public void connectComplete(boolean reconnect, String serverURI) {
@@ -413,11 +417,17 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
             @Override
             public void connectionLost(Throwable cause) {
-                String errorMsg = cause != null ? cause.getMessage() : "Unknown";
                 if (!isCurrentClient(attemptClient)) {
-                    Log.d(TAG, "Ignoring connectionLost from a superseded client: " + errorMsg);
+                    Log.d(TAG, "Ignoring connectionLost from a superseded client: " + describeThrowable(cause));
                     return;
                 }
+                // The trust reason belongs on this path too, not only on connect()'s onFailure: a
+                // broker certificate that expires or rotates after a working connection is rejected
+                // during an automaticReconnect handshake, which surfaces here. Without the append,
+                // the likeliest real trust failure in the field still reports as a bare
+                // CONNECTION_LOST wrapping a handshake error that names no certificate.
+                String trustFailure = attemptTrustFailure == null ? null : attemptTrustFailure.reason();
+                String errorMsg = describeConnectFailure(cause, trustFailure);
                 Log.w(TAG, "MQTT connection lost: " + errorMsg);
                 sendEvent("MqttDisconnected", "Connection lost: " + errorMsg);
             }
@@ -500,6 +510,167 @@ public class MqttModule extends ReactContextBaseJavaModule {
                 || reasonCode == MqttException.REASON_CODE_CLIENT_DISCONNECTING;
     }
 
+    // ============================================================================
+    // ERROR DESCRIPTION — what crosses the bridge when something fails
+    // ============================================================================
+
+    /**
+     * Names for the Paho reason codes a connect, subscribe, publish, or disconnect can report, so a
+     * failure says what was objected to rather than carrying a bare number. Anything not listed
+     * falls back to the number alone.
+     */
+    private static final Map<Integer, String> MQTT_REASON_CODE_NAMES = buildReasonCodeNames();
+
+    private static Map<Integer, String> buildReasonCodeNames() {
+        Map<Integer, String> names = new HashMap<>();
+        names.put((int) MqttException.REASON_CODE_CLIENT_EXCEPTION, "CLIENT_EXCEPTION");
+        names.put((int) MqttException.REASON_CODE_INVALID_PROTOCOL_VERSION, "INVALID_PROTOCOL_VERSION");
+        names.put((int) MqttException.REASON_CODE_INVALID_CLIENT_ID, "INVALID_CLIENT_ID");
+        names.put((int) MqttException.REASON_CODE_BROKER_UNAVAILABLE, "BROKER_UNAVAILABLE");
+        names.put((int) MqttException.REASON_CODE_FAILED_AUTHENTICATION, "FAILED_AUTHENTICATION");
+        names.put((int) MqttException.REASON_CODE_NOT_AUTHORIZED, "NOT_AUTHORIZED");
+        names.put((int) MqttException.REASON_CODE_UNEXPECTED_ERROR, "UNEXPECTED_ERROR");
+        names.put((int) MqttException.REASON_CODE_SUBSCRIBE_FAILED, "SUBSCRIBE_FAILED");
+        names.put((int) MqttException.REASON_CODE_CLIENT_TIMEOUT, "CLIENT_TIMEOUT");
+        names.put((int) MqttException.REASON_CODE_NO_MESSAGE_IDS_AVAILABLE, "NO_MESSAGE_IDS_AVAILABLE");
+        names.put((int) MqttException.REASON_CODE_WRITE_TIMEOUT, "WRITE_TIMEOUT");
+        names.put((int) MqttException.REASON_CODE_CLIENT_CONNECTED, "CLIENT_CONNECTED");
+        names.put((int) MqttException.REASON_CODE_CLIENT_ALREADY_DISCONNECTED, "CLIENT_ALREADY_DISCONNECTED");
+        names.put((int) MqttException.REASON_CODE_CLIENT_DISCONNECTING, "CLIENT_DISCONNECTING");
+        names.put((int) MqttException.REASON_CODE_SERVER_CONNECT_ERROR, "SERVER_CONNECT_ERROR");
+        names.put((int) MqttException.REASON_CODE_CLIENT_NOT_CONNECTED, "CLIENT_NOT_CONNECTED");
+        names.put((int) MqttException.REASON_CODE_SOCKET_FACTORY_MISMATCH, "SOCKET_FACTORY_MISMATCH");
+        names.put((int) MqttException.REASON_CODE_SSL_CONFIG_ERROR, "SSL_CONFIG_ERROR");
+        names.put((int) MqttException.REASON_CODE_CLIENT_DISCONNECT_PROHIBITED, "CLIENT_DISCONNECT_PROHIBITED");
+        names.put((int) MqttException.REASON_CODE_INVALID_MESSAGE, "INVALID_MESSAGE");
+        names.put((int) MqttException.REASON_CODE_CONNECTION_LOST, "CONNECTION_LOST");
+        names.put((int) MqttException.REASON_CODE_CONNECT_IN_PROGRESS, "CONNECT_IN_PROGRESS");
+        names.put((int) MqttException.REASON_CODE_CLIENT_CLOSED, "CLIENT_CLOSED");
+        names.put((int) MqttException.REASON_CODE_TOKEN_INUSE, "TOKEN_INUSE");
+        names.put((int) MqttException.REASON_CODE_MAX_INFLIGHT, "MAX_INFLIGHT");
+        names.put((int) MqttException.REASON_CODE_DISCONNECTED_BUFFER_FULL, "DISCONNECTED_BUFFER_FULL");
+        return Collections.unmodifiableMap(names);
+    }
+
+    /**
+     * Flattens a throwable and its whole cause chain into one line, outermost first, so the reason a
+     * call failed survives the trip to JS.
+     *
+     * Reading only {@code getMessage()} off the top of the chain is what makes a failure
+     * undiagnosable from a crash report. Paho reports a rejected certificate, an unreachable broker,
+     * and an unreadable keystore alike as an {@link MqttException} wrapping the real cause, with
+     * reason code 0 (CLIENT_EXCEPTION). {@code MqttException.getMessage()} ignores the cause
+     * entirely and looks the reason code up in a ResourceBundle, which has no entry for 0 — so it
+     * returns the bundle's fallback, the literal string "MqttException". Every distinct failure
+     * therefore reports the same useless word, with the detail sitting one level down in a cause
+     * nobody reads.
+     *
+     * Each level contributes its type, a Paho reason code where it has one, and its message when
+     * non-empty. The type is always included: an exception with no message at all still tells you
+     * which layer failed.
+     */
+    static String describeThrowable(Throwable throwable) {
+        if (throwable == null) {
+            return "Unknown error (no exception reported)";
+        }
+
+        StringBuilder description = new StringBuilder();
+        // Identity, not equals: a cause chain can loop, and a Throwable that does override equals
+        // would otherwise end the walk at the first distinct-but-equal level, dropping the root cause
+        // this method exists to surface. HashSet would give identity only by accident of Throwable
+        // not overriding it.
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = throwable;
+        while (current != null && visited.add(current)) {
+            if (description.length() > 0) {
+                description.append(" <- caused by ");
+            }
+            description.append(describeOneThrowable(current));
+            current = current.getCause();
+        }
+        return description.toString();
+    }
+
+    private static String describeOneThrowable(Throwable throwable) {
+        String typeName = throwable.getClass().getSimpleName();
+        StringBuilder text = new StringBuilder(typeName);
+
+        if (throwable instanceof MqttException) {
+            int reasonCode = ((MqttException) throwable).getReasonCode();
+            String reasonName = MQTT_REASON_CODE_NAMES.get(reasonCode);
+            text.append("(reasonCode=").append(reasonCode);
+            if (reasonName != null) {
+                text.append(' ').append(reasonName);
+            }
+            text.append(')');
+        }
+
+        String message = throwable.getMessage();
+        String trimmed = message == null ? null : message.trim();
+        // A message equal to the type name carries nothing the type has not already said, and it is
+        // what Paho's message bundle returns for a reason code it has no entry for.
+        if (trimmed != null && !trimmed.isEmpty() && !trimmed.equals(typeName)) {
+            text.append(": ").append(trimmed);
+        }
+        return text.toString();
+    }
+
+    /**
+     * Records why the trust manager rejected the broker certificate, so the reason outlives the TLS
+     * stack that discards it.
+     */
+    interface TrustFailureRecorder {
+        /** @param reason why the certificate was rejected, or null when it was accepted. */
+        void record(String reason);
+    }
+
+    /**
+     * One connect attempt's trust verdict: the trust manager's own rejection reason, or null when it
+     * has not rejected anything. Conscrypt reports a rejected certificate as a handshake failure and
+     * Paho wraps that again, and neither layer is required to carry the {@link CertificateException}
+     * message through, so the reason is captured where it is produced.
+     *
+     * Held per attempt rather than per module, because an attempt's client outlives the attempt:
+     * {@link #cleanupConnection(MqttAndroidClient)} deliberately leaves a superseded client connected
+     * when a replacement already owns the handle, so that client keeps its own SSLContext and can
+     * still run handshakes under automaticReconnect. One field shared across attempts lets a stale
+     * client's accepting handshake record null over the live attempt's real rejection reason — which
+     * puts the report back to the bare "MqttException" this flattening exists to replace — or lets its
+     * rejection be reported as the cause of an unrelated failure. A holder per attempt makes both
+     * unreachable without an identity guard on either side: a superseded client's trust manager holds
+     * only its own holder, so it cannot reach the live attempt's.
+     *
+     * Written from the TLS handshake thread, read from Paho's callback thread.
+     */
+    static final class TrustFailureHolder implements TrustFailureRecorder {
+        private volatile String reason;
+
+        @Override
+        public void record(String reason) {
+            this.reason = reason;
+        }
+
+        /** Why this attempt's most recent handshake rejected the broker, or null if it passed. */
+        String reason() {
+            return reason;
+        }
+    }
+
+    /**
+     * Why an attempt failed: the flattened exception chain, plus the trust manager's rejection
+     * reason when the handshake stack dropped it on the way up. Only appended when the chain does
+     * not already carry it, since Conscrypt often does preserve it.
+     *
+     * @param trustFailure the attempt's {@link TrustFailureHolder#reason()}, or null.
+     */
+    static String describeConnectFailure(Throwable exception, String trustFailure) {
+        String description = describeThrowable(exception);
+        if (trustFailure != null && !description.contains(trustFailure)) {
+            return description + " | broker certificate rejected: " + trustFailure;
+        }
+        return description;
+    }
+
     @NonNull
     @Override
     public String getName() {
@@ -524,7 +695,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             Log.e(TAG, "Cleanup error", e);
             if (errorCallback != null) {
-                errorCallback.invoke("Cleanup error: " + e.getMessage());
+                errorCallback.invoke("Cleanup error: " + describeThrowable(e));
             }
         }
     }
@@ -540,10 +711,13 @@ public class MqttModule extends ReactContextBaseJavaModule {
         private final X509Certificate[] acceptedIssuers;
         private final String expectedBrokerCN;
         private final String expectedSniHost;
+        private final TrustFailureRecorder trustFailureRecorder;
 
-        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost) throws Exception {
+        public CustomTrustManager(KeyStore trustStore, String expectedBrokerCN, String expectedSniHost,
+                TrustFailureRecorder trustFailureRecorder) throws Exception {
             this.expectedBrokerCN = expectedBrokerCN;
             this.expectedSniHost = expectedSniHost;
+            this.trustFailureRecorder = trustFailureRecorder;
 
             List<X509Certificate> certs = new ArrayList<>();
             Enumeration<String> aliases = trustStore.aliases();
@@ -577,8 +751,31 @@ public class MqttModule extends ReactContextBaseJavaModule {
             // Not needed for client
         }
 
+        /**
+         * Records the rejection reason before rethrowing. Everything above this frame is the TLS
+         * stack, which is free to report a rejected certificate as a bare handshake failure, so this
+         * is the last point at which the reason is still readable.
+         *
+         * The accepting path records null rather than nothing: Paho can reconnect this client without
+         * a new connect() to reset the state, and a handshake that now passes must not leave an
+         * earlier rejection behind for a later, unrelated failure to report.
+         */
         @Override
         public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            try {
+                validateServerCertificate(chain, authType);
+            } catch (CertificateException e) {
+                if (trustFailureRecorder != null) {
+                    trustFailureRecorder.record(describeThrowable(e));
+                }
+                throw e;
+            }
+            if (trustFailureRecorder != null) {
+                trustFailureRecorder.record(null);
+            }
+        }
+
+        private void validateServerCertificate(X509Certificate[] chain, String authType) throws CertificateException {
             if (chain == null || chain.length == 0) {
                 throw new CertificateException("Server certificate chain is empty");
             }
@@ -963,6 +1160,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
             Log.i(TAG, "Expected broker CN: " + (effectiveBrokerCN != null ? effectiveBrokerCN : "N/A (admin)"));
             Log.i(TAG, "Key: " + privateKeyAlias + " (software)");
 
+            // Belongs to one attempt: a reason left over from a previous connection would be
+            // reported as this attempt's root cause. Created here and handed to both the trust
+            // manager that writes it and the callbacks that read it, so no other attempt's client can
+            // reach it — see TrustFailureHolder.
+            final TrustFailureHolder attemptTrustFailure = new TrustFailureHolder();
+
             final MqttAndroidClient attemptClient = new MqttAndroidClient(
                     getReactApplicationContext(),
                     brokerUrl,
@@ -985,11 +1188,12 @@ public class MqttModule extends ReactContextBaseJavaModule {
                     effectiveSniHost,   // null for admin — skips SNI/SAN pin (chain validation still runs)
                     keystorePath,
                     keystorePassword,
-                    keystoreFormat);
+                    keystoreFormat,
+                    attemptTrustFailure);
 
             options.setSocketFactory(sslContext.getSocketFactory());
 
-            attemptClient.setCallback(createAttemptCallback(attemptClient));
+            attemptClient.setCallback(createAttemptCallback(attemptClient, attemptTrustFailure));
 
             attemptClient.connect(options, null, new IMqttActionListener() {
                 @Override
@@ -1000,17 +1204,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                    String errorMessage = "Connection failed";
-
-                    if (exception != null) {
-                        errorMessage = exception.getMessage();
-                        if (errorMessage == null || errorMessage.isEmpty()) {
-                            errorMessage = exception.getClass().getSimpleName();
-                        }
-                        Log.e(TAG, "MQTT CONNECTION FAILED", exception);
-                    } else {
-                        Log.e(TAG, "MQTT CONNECTION FAILED: Unknown error");
-                    }
+                    String errorMessage = describeConnectFailure(exception, attemptTrustFailure.reason());
+                    Log.e(TAG, "MQTT CONNECTION FAILED: " + errorMessage, exception);
 
                     // Nothing this client does can recover an unusable cached connection, so evict
                     // its handle now and let the next attempt build a fresh one. Named explicitly
@@ -1036,7 +1231,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
             // the only thread that installs a client, and @ReactMethod dispatch is serialized, so no
             // newer client can exist yet. Paho's callbacks only ever clear the field, never install.
             cleanupConnection();
-            safeInvoke(error, callbackFired, e.getMessage() != null ? e.getMessage() : "Setup failed");
+            safeInvoke(error, callbackFired, "Connection setup failed: " + describeThrowable(e));
         }
     }
 
@@ -1052,7 +1247,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
             String expectedSniHost,
             String keystorePath,
             String keystorePassword,
-            String keystoreFormat) throws Exception {
+            String keystoreFormat,
+            TrustFailureRecorder trustFailureRecorder) throws Exception {
 
         Log.d(TAG, "Creating SSL context with software-backed key");
 
@@ -1121,7 +1317,8 @@ public class MqttModule extends ReactContextBaseJavaModule {
         }
 
         TrustManager[] trustManagers = new TrustManager[] {
-                new CustomTrustManager(trustStore, expectedBrokerCN, expectedSniHost)
+                new CustomTrustManager(trustStore, expectedBrokerCN, expectedSniHost,
+                        trustFailureRecorder)
         };
 
         // Create SSL context with TLS 1.3
@@ -1162,7 +1359,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                    String errorMsg = exception != null ? exception.getMessage() : "Subscribe failed";
+                    String errorMsg = describeThrowable(exception);
                     Log.e(TAG, "Subscribe failed: " + errorMsg);
                     safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + errorMsg);
                 }
@@ -1170,7 +1367,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         } catch (Exception e) {
             Log.e(TAG, "Subscribe error", e);
-            safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + e.getMessage());
+            safeInvoke(errorCallback, callbackFired, "Subscribe failed: " + describeThrowable(e));
         }
     }
 
@@ -1191,7 +1388,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                    String errorMsg = exception != null ? exception.getMessage() : "Unsubscribe failed";
+                    String errorMsg = describeThrowable(exception);
                     Log.e(TAG, "Unsubscribe failed: " + errorMsg);
                     safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + errorMsg);
                 }
@@ -1199,7 +1396,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         } catch (Exception e) {
             Log.e(TAG, "Unsubscribe error", e);
-            safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + e.getMessage());
+            safeInvoke(errorCallback, callbackFired, "Unsubscribe failed: " + describeThrowable(e));
         }
     }
 
@@ -1238,7 +1435,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                 @Override
                 public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                    String errorMsg = exception != null ? exception.getMessage() : "Publish failed";
+                    String errorMsg = describeThrowable(exception);
                     Log.e(TAG, "Publish failed: " + errorMsg);
                     safeInvoke(errorCallback, callbackFired, "Publish failed: " + errorMsg);
                 }
@@ -1246,7 +1443,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
         } catch (Exception e) {
             Log.e(TAG, "Publish error", e);
-            safeInvoke(errorCallback, callbackFired, "Publish failed: " + e.getMessage());
+            safeInvoke(errorCallback, callbackFired, "Publish failed: " + describeThrowable(e));
         }
     }
 
@@ -1280,7 +1477,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
 
                     @Override
                     public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
-                        String errorMsg = exception != null ? exception.getMessage() : "Disconnect failed";
+                        String errorMsg = describeThrowable(exception);
                         Log.e(TAG, "Disconnect failed: " + errorMsg);
 
                         // The handle is evicted whether or not the broker acknowledged, so the
@@ -1301,7 +1498,7 @@ public class MqttModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             Log.e(TAG, "Disconnect error", e);
             cleanupConnection(disconnectingClient);
-            safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + e.getMessage());
+            safeInvoke(errorCallback, callbackFired, "Disconnect failed: " + describeThrowable(e));
         }
     }
 
@@ -1553,32 +1750,38 @@ public class MqttModule extends ReactContextBaseJavaModule {
         Log.d(TAG, "Loading software keystore from: " + keystoreFile.getAbsolutePath());
         Log.d(TAG, "Keystore format hint: " + (keystoreFormat != null ? keystoreFormat : "auto-detect"));
 
+        // Collected rather than logged and dropped: a load failure here is indistinguishable from
+        // the outside — a wrong password, a truncated file, and a keystore written by a different
+        // MasterKey all end as "could not be read" — and the app has no device log to fall back on,
+        // only the message this method throws.
+        List<String> loadFailures = new ArrayList<>();
+
         // If format is explicitly specified, try only that format
         if ("pkcs12".equals(keystoreFormat)) {
-            KeyStore keyStore = tryLoadPlainKeyStore(keystoreFile, password);
+            KeyStore keyStore = tryLoadPlainKeyStore(keystoreFile, password, loadFailures);
             if (keyStore != null) {
                 Log.d(TAG, "Loaded plain PKCS12 keystore successfully");
                 return keyStore;
             }
-            throw new KeyException("Failed to load keystore as PKCS12 format");
+            throw new KeyException("Failed to load keystore as PKCS12 format. " + describeLoadFailures(loadFailures));
         } else if ("encrypted".equals(keystoreFormat)) {
-            KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
+            KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password, loadFailures);
             if (keyStore != null) {
                 Log.d(TAG, "Loaded encrypted keystore successfully");
                 return keyStore;
             }
-            throw new KeyException("Failed to load keystore as encrypted format");
+            throw new KeyException("Failed to load keystore as encrypted format. " + describeLoadFailures(loadFailures));
         }
 
         // Auto-detect: Try encrypted format first (new CSR module behavior)
-        KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password);
+        KeyStore keyStore = tryLoadEncryptedKeyStore(keystoreFile, password, loadFailures);
         if (keyStore != null) {
             Log.d(TAG, "Loaded encrypted keystore successfully");
             return keyStore;
         }
 
         // Fall back to plain PKCS12 format (legacy CSR module behavior)
-        keyStore = tryLoadPlainKeyStore(keystoreFile, password);
+        keyStore = tryLoadPlainKeyStore(keystoreFile, password, loadFailures);
         if (keyStore != null) {
             Log.d(TAG, "Loaded plain PKCS12 keystore successfully (legacy format)");
             // States what is true of this device rather than asking the reader to act: this line
@@ -1594,8 +1797,24 @@ public class MqttModule extends ReactContextBaseJavaModule {
             "Failed to load software keystore. " +
             "File exists but could not be read as encrypted or plain PKCS12. " +
             "The keystore may be corrupted or in an unsupported format. " +
-            "Try regenerating certificates with the CSR module."
+            "Try regenerating certificates with the CSR module. " +
+            describeLoadFailures(loadFailures)
         );
+    }
+
+    /** Joins the per-format keystore load failures into one clause. */
+    static String describeLoadFailures(List<String> loadFailures) {
+        if (loadFailures.isEmpty()) {
+            return "No load attempt reported a reason.";
+        }
+        StringBuilder text = new StringBuilder("Load attempts: ");
+        for (int i = 0; i < loadFailures.size(); i++) {
+            if (i > 0) {
+                text.append("; ");
+            }
+            text.append(loadFailures.get(i));
+        }
+        return text.toString();
     }
 
     /**
@@ -1603,9 +1822,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
      *
      * @param keystoreFile The PKCS12 keystore file
      * @param password Password for the PKCS12 keystore
+     * @param loadFailures Collects why this format did not load, for the caller's thrown message
      * @return Loaded KeyStore, or null if file is not in encrypted format
      */
-    private KeyStore tryLoadEncryptedKeyStore(File keystoreFile, String password) {
+    private KeyStore tryLoadEncryptedKeyStore(File keystoreFile, String password, List<String> loadFailures) {
         try {
             MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -1626,11 +1846,15 @@ public class MqttModule extends ReactContextBaseJavaModule {
             return keyStore;
         } catch (SecurityException e) {
             // SecurityException means file is not encrypted or encryption format mismatch
-            Log.d(TAG, "Keystore is not in encrypted format: " + e.getMessage());
+            String reason = describeThrowable(e);
+            Log.d(TAG, "Keystore is not in encrypted format: " + reason);
+            loadFailures.add("not in encrypted format (" + reason + ")");
             return null;
         } catch (Exception e) {
             // Other exceptions (IO, key format, etc.) - try next format
-            Log.d(TAG, "Failed to load encrypted keystore: " + e.getMessage());
+            String reason = describeThrowable(e);
+            Log.d(TAG, "Failed to load encrypted keystore: " + reason);
+            loadFailures.add("encrypted (" + reason + ")");
             return null;
         }
     }
@@ -1640,9 +1864,10 @@ public class MqttModule extends ReactContextBaseJavaModule {
      *
      * @param keystoreFile The PKCS12 keystore file
      * @param password Password for the PKCS12 keystore
+     * @param loadFailures Collects why this format did not load, for the caller's thrown message
      * @return Loaded KeyStore, or null if file cannot be loaded as plain PKCS12
      */
-    private KeyStore tryLoadPlainKeyStore(File keystoreFile, String password) {
+    private KeyStore tryLoadPlainKeyStore(File keystoreFile, String password, List<String> loadFailures) {
         try {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
             try (FileInputStream fis = new FileInputStream(keystoreFile)) {
@@ -1652,7 +1877,9 @@ public class MqttModule extends ReactContextBaseJavaModule {
             return keyStore;
         } catch (Exception e) {
             // Not a valid plain PKCS12 file
-            Log.d(TAG, "Failed to load plain PKCS12 keystore: " + e.getMessage());
+            String reason = describeThrowable(e);
+            Log.d(TAG, "Failed to load plain PKCS12 keystore: " + reason);
+            loadFailures.add("plain PKCS12 (" + reason + ")");
             return null;
         }
     }
